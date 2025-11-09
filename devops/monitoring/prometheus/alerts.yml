@@ -1,0 +1,108 @@
+groups:
+  - name: verify-api-alerts
+    interval: 30s
+    rules:
+      # API Health Alerts
+      - alert: VerifyApiDown
+        expr: up{job="verify-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "Verify API is down"
+          description: "Verify API has been down for more than 1 minute. Service is unavailable."
+
+      # Performance Alerts
+      - alert: HighResponseTime
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_server_requests_seconds_bucket{job="verify-api"}[5m])) by (le, uri)
+          ) > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: performance
+        annotations:
+          summary: "High response time detected"
+          description: "95th percentile response time is above 5 seconds for {{ $labels.uri }}"
+
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(http_server_requests_seconds_count{job="verify-api",status=~"5.."}[5m]))
+            /
+            sum(rate(http_server_requests_seconds_count{job="verify-api"}[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is above 5% for the last 5 minutes (current: {{ $value | humanizePercentage }})"
+
+      # JVM Alerts
+      - alert: HighHeapMemoryUsage
+        expr: |
+          100 * (
+            jvm_memory_used_bytes{job="verify-api",area="heap"}
+            /
+            jvm_memory_max_bytes{job="verify-api",area="heap"}
+          ) > 90
+        for: 5m
+        labels:
+          severity: warning
+          component: jvm
+        annotations:
+          summary: "High heap memory usage"
+          description: "JVM heap memory usage is above 90% (current: {{ $value | humanize }}%)"
+
+      - alert: HighGCActivity
+        expr: rate(jvm_gc_pause_seconds_sum{job="verify-api"}[5m]) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          component: jvm
+        annotations:
+          summary: "High garbage collection activity"
+          description: "GC is consuming more than 50% of time (current: {{ $value | humanizePercentage }})"
+
+      # System Alerts
+      - alert: HighCPUUsage
+        expr: system_cpu_usage{job="verify-api"} > 0.85
+        for: 10m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is above 85% for 10 minutes (current: {{ $value | humanizePercentage }})"
+
+      - alert: ThreadPoolExhaustion
+        expr: |
+          (
+            tomcat_threads_current_threads{job="verify-api"}
+            /
+            tomcat_threads_config_max_threads{job="verify-api"}
+          ) > 0.9
+        for: 5m
+        labels:
+          severity: critical
+          component: tomcat
+        annotations:
+          summary: "Thread pool near exhaustion"
+          description: "Tomcat thread pool is above 90% capacity (current: {{ $value | humanizePercentage }})"
+
+      # Business Metrics
+      - alert: NoVerificationRequestsRecently
+        expr: |
+          rate(http_server_requests_seconds_count{job="verify-api",uri=~"/api/v1/verify/.*",status="200"}[30m]) == 0
+        for: 1h
+        labels:
+          severity: info
+          component: business
+        annotations:
+          summary: "No verification requests recently"
+          description: "No successful verification requests in the last hour. Check if service is being used."
+
