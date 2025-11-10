@@ -126,19 +126,19 @@ public class AdvancedSignatureVerificationService {
         if (config.isOnlineValidationEnabled()) {
             // OCSP Source
             OnlineOCSPSource ocspSource = new OnlineOCSPSource();
-            CommonsDataLoader dataLoader = new CommonsDataLoader();
-            dataLoader.setTimeoutConnection(10000);
-            dataLoader.setTimeoutSocket(10000);
-            ocspSource.setDataLoader(dataLoader);
+            // CommonsDataLoader dataLoader = new CommonsDataLoader();
+            // dataLoader.setTimeoutConnection(10000);
+            // dataLoader.setTimeoutSocket(10000);
+            // ocspSource.setDataLoader(dataLoader);
             verifier.setOcspSource(ocspSource);
 
             // CRL Source
             OnlineCRLSource crlSource = new OnlineCRLSource();
-            crlSource.setDataLoader(dataLoader);
+            // crlSource.setDataLoader(dataLoader);
             verifier.setCrlSource(crlSource);
 
             // AIA Source (sertifika zinciri için)
-            DefaultAIASource aiaSource = new DefaultAIASource(dataLoader);
+            DefaultAIASource aiaSource = new DefaultAIASource();
             verifier.setAIASource(aiaSource);
 
             logger.info("Online validation enabled: OCSP and CRL sources configured");
@@ -227,6 +227,13 @@ public class AdvancedSignatureVerificationService {
             sigInfo.setSubIndication(subIndication.name());
         }
 
+        // STRICT VALIDATION: SubIndication varsa geçersiz say
+        if (config.isStrictMode() && subIndication != null && isValid) {
+            logger.warn("STRICT MODE: Signature has SubIndication {}, marking as invalid", subIndication);
+            isValid = false;
+            sigInfo.setValid(false);
+        }
+
         // İmza formatı ve seviyesi
         if (simpleReport.getSignatureFormat(signatureId) != null) {
             sigInfo.setSignatureFormat(simpleReport.getSignatureFormat(signatureId).toString());
@@ -250,6 +257,28 @@ public class AdvancedSignatureVerificationService {
 
         // Hatalar ve uyarılar
         collectErrorsAndWarnings(sigInfo, simpleReport, detailedReport, signatureId);
+
+        // STRICT VALIDATION: Kritik hata varsa geçersiz say
+        if (config.isStrictMode() && !sigInfo.getValidationErrors().isEmpty()) {
+            logger.warn("STRICT MODE: Signature has {} validation errors, marking as invalid", 
+                    sigInfo.getValidationErrors().size());
+            sigInfo.setValid(false);
+        }
+
+        // STRICT VALIDATION: Timestamp hatalarını kontrol et
+        if (config.isStrictMode() && signatureWrapper != null) {
+            List<TimestampWrapper> timestamps = signatureWrapper.getTimestampList();
+            if (timestamps != null && !timestamps.isEmpty()) {
+                for (TimestampWrapper ts : timestamps) {
+                    if (!ts.isMessageImprintDataFound() || !ts.isMessageImprintDataIntact()) {
+                        logger.error("STRICT MODE: Timestamp validation failed: message imprint issue");
+                        sigInfo.setValid(false);
+                        sigInfo.getValidationErrors().add("Timestamp doğrulama hatası: Message imprint bozuk veya bulunamadı");
+                        break;
+                    }
+                }
+            }
+        }
 
         return sigInfo;
     }
@@ -433,6 +462,34 @@ public class AdvancedSignatureVerificationService {
                 errorMsg += " (" + subIndication.name() + ")";
             }
             errors.add(errorMsg);
+        }
+
+        // SubIndication kontrolü - STRICT MODE
+        SubIndication subIndication = simpleReport.getSubIndication(signatureId);
+        if (subIndication != null) {
+            String subIndicationMsg = "İmza uyarısı: " + subIndication.name();
+            
+            // Kritik SubIndication'lar direkt hata olarak ele alınır
+            switch (subIndication) {
+                case FORMAT_FAILURE:
+                case HASH_FAILURE:
+                case SIG_CRYPTO_FAILURE:
+                case SIG_CONSTRAINTS_FAILURE:
+                case CHAIN_CONSTRAINTS_FAILURE:
+                case CERTIFICATE_CHAIN_GENERAL_FAILURE:
+                case CRYPTO_CONSTRAINTS_FAILURE:
+                case REVOKED:
+                case REVOKED_NO_POE:
+                case REVOKED_CA_NO_POE:
+                case EXPIRED:
+                case NOT_YET_VALID:
+                    errors.add(subIndicationMsg + " (Kritik hata)");
+                    logger.error("Critical SubIndication detected: {}", subIndication);
+                    break;
+                default:
+                    warnings.add(subIndicationMsg);
+                    break;
+            }
         }
 
         // Detailed report'tan ek bilgiler - DSS 6.3'te farklı API

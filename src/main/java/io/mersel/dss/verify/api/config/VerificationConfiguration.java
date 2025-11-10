@@ -33,6 +33,9 @@ public class VerificationConfiguration {
     @Value("${CRL_CACHE_TTL:3600}")
     private int crlCacheTtl;
 
+    @Value("${verification.strict-mode:true}")
+    private boolean strictMode;
+
     public String getCertStorePath() {
         return certStorePath;
     }
@@ -63,6 +66,14 @@ public class VerificationConfiguration {
 
     public int getCrlCacheTtl() {
         return crlCacheTtl;
+    }
+
+    public boolean isStrictMode() {
+        return strictMode;
+    }
+
+    public void setStrictMode(boolean strictMode) {
+        this.strictMode = strictMode;
     }
 }
 
