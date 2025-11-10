@@ -65,7 +65,7 @@ git commit -m "feat: yeni özellik"
 git push origin develop
 ```
 
-Bu `yourusername/verify-api:develop` image'ini oluşturur.
+Bu `mersel/dss-verifier-api-java:develop` image'ini oluşturur.
 
 #### 2. Production Release
 
@@ -81,10 +81,10 @@ git push origin v1.0.0
 ```
 
 Bu aşağıdaki image'leri oluşturur:
-- `yourusername/verify-api:latest`
-- `yourusername/verify-api:v1.0.0`
-- `yourusername/verify-api:1.0`
-- `yourusername/verify-api:1`
+- `mersel/dss-verifier-api-java:latest`
+- `mersel/dss-verifier-api-java:v1.0.0`
+- `mersel/dss-verifier-api-java:1.0`
+- `mersel/dss-verifier-api-java:1`
 
 #### 3. Manuel Çalıştırma
 
@@ -99,13 +99,13 @@ Build edilen image'leri çekmek için:
 
 ```bash
 # Latest version
-docker pull yourusername/verify-api:latest
+docker pull mersel/dss-verifier-api-java:latest
 
 # Specific version
-docker pull yourusername/verify-api:v1.0.0
+docker pull mersel/dss-verifier-api-java:v1.0.0
 
 # Development version
-docker pull yourusername/verify-api:develop
+docker pull mersel/dss-verifier-api-java:develop
 ```
 
 ### Workflow Özellikleri

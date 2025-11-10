@@ -222,7 +222,7 @@ JAVA_OPTS=-Xmx2g -Xms1g
 
 Sorun mu yaşıyorsunuz?
 1. [Troubleshooting Guide](../TROUBLESHOOTING.md)
-2. [GitHub Issues](https://github.com/yourusername/verify-api/issues)
+2. [GitHub Issues](https://github.com/mersel/dss-verifier-api-java/issues)
 3. [Main Documentation](../README.md)
 
 ---
