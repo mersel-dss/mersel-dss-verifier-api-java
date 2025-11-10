@@ -8,6 +8,7 @@ public enum SignatureType {
     XADES,
     CADES,
     ASIC_S,
-    ASIC_E
+    ASIC_E,
+    UNKNOWN
 }
 

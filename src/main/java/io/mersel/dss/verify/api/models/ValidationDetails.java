@@ -15,6 +15,8 @@ public class ValidationDetails {
     private boolean certificateNotRevoked;
     private boolean trustAnchorReached;
     private boolean timestampValid;
+    private boolean cryptographicVerificationSuccessful;
+    private boolean revocationCheckPerformed;
     private Map<String, String> additionalDetails;
 
     // Getters and Setters
@@ -72,6 +74,22 @@ public class ValidationDetails {
 
     public void setAdditionalDetails(Map<String, String> additionalDetails) {
         this.additionalDetails = additionalDetails;
+    }
+
+    public boolean isCryptographicVerificationSuccessful() {
+        return cryptographicVerificationSuccessful;
+    }
+
+    public void setCryptographicVerificationSuccessful(boolean cryptographicVerificationSuccessful) {
+        this.cryptographicVerificationSuccessful = cryptographicVerificationSuccessful;
+    }
+
+    public boolean isRevocationCheckPerformed() {
+        return revocationCheckPerformed;
+    }
+
+    public void setRevocationCheckPerformed(boolean revocationCheckPerformed) {
+        this.revocationCheckPerformed = revocationCheckPerformed;
     }
 }
 

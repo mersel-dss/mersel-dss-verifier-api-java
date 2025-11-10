@@ -16,6 +16,7 @@ public class VerificationResult {
     private String status;
     private SignatureType signatureType;
     private Date verificationTime;
+    private Integer signatureCount;
     private List<SignatureInfo> signatures = new ArrayList<>();
     private List<String> errors = new ArrayList<>();
     private List<String> warnings = new ArrayList<>();
@@ -102,6 +103,14 @@ public class VerificationResult {
 
     public void setValidationDetails(ValidationDetails validationDetails) {
         this.validationDetails = validationDetails;
+    }
+
+    public Integer getSignatureCount() {
+        return signatureCount;
+    }
+
+    public void setSignatureCount(Integer signatureCount) {
+        this.signatureCount = signatureCount;
     }
 }
 

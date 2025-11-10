@@ -33,21 +33,48 @@ Bu API, PAdES (PDF), XAdES (XML) dijital imzaların ve zaman damgalarının doğ
 
 ## 🌟 Özellikler
 
-- ✅ **PAdES (PDF) İmza Doğrulama** - PDF belgelerindeki dijital imzaları doğrulama
-- ✅ **XAdES (XML) İmza Doğrulama** - XML belgelerindeki dijital imzaları doğrulama
-  - Enveloped, Enveloping ve Detached imza desteği
-- ✅ **Zaman Damgası Doğrulama** - RFC 3161 uyumlu zaman damgası doğrulama
-- ✅ **Sertifika Zinciri Doğrulama** - Güvenilir root sertifikalara kadar doğrulama
-- ✅ **İptal Kontrolü** - OCSP ve CRL ile sertifika iptal durumu kontrolü
+### 📝 Desteklenen İmza Formatları
+
+#### XAdES (XML Advanced Electronic Signatures)
+- ✅ **XAdES-BES** - Basic Electronic Signature
+- ✅ **XAdES-EPES** - Explicit Policy-based Electronic Signature
+- ✅ **XAdES-T** - Timestamp
+- ✅ **XAdES-C** - Complete
+- ✅ **XAdES-X** - eXtended
+- ✅ **XAdES-XL** - eXtended Long-term
+- ✅ **XAdES-A** - Archival (uzun vadeli arşivleme)
+
+#### PAdES (PDF Advanced Electronic Signatures)
+- ✅ **PAdES-B-B** - Basic
+- ✅ **PAdES-B-T** - Basic with Timestamp
+- ✅ **PAdES-B-LT** - Basic Long-Term
+- ✅ **PAdES-B-LTA** - Basic Long-Term with Archive timestamp
+
+#### CAdES (CMS Advanced Electronic Signatures)
+- ✅ **CAdES-BES** - Basic Electronic Signature
+- ✅ **CAdES-EPES** - Explicit Policy-based Electronic Signature
+- ✅ **CAdES-T, C, X, XL, A** - Tüm seviyeler desteklenir
+
+### 🔧 Temel Özellikler
+
+- ✅ **Birleşik Doğrulama Endpoint** - Tüm formatları otomatik algılar
+- ✅ **Enveloped, Enveloping ve Detached İmza** - Tüm imza tipleri
+- ✅ **Zaman Damgası Doğrulama** - RFC 3161 uyumlu, TSA sertifika kontrolü
+- ✅ **Message Imprint Doğrulama** - Orijinal veri ile timestamp eşleştirme
+- ✅ **Sertifika Zinciri Doğrulama** - Güvenilir root'a kadar tam zincir
+- ✅ **OCSP ve CRL Kontrolü** - Sertifika iptal durumu kontrolü
+- ✅ **AIA Support** - Otomatik sertifika zinciri tamamlama
 - ✅ **Güvenilir Kök Sertifika Resolver Desteği** - Üç farklı resolver tipi
   - **KamuSM XML Depo Online**: İnternet üzerinden KamuSM XML deposunu yükler
   - **KamuSM XML Depo Offline**: Yerel dosyadan KamuSM XML deposunu yükler
   - **Certificate Folder**: Klasördeki tüm .crt/.cer/.pem dosyalarını yükler
 - ✅ **İki Seviyeli Doğrulama**
   - **Simple**: Hızlı, temel imza doğrulaması
-  - **Comprehensive**: Detaylı, tüm bilgileri içeren doğrulama
+  - **Comprehensive**: Detaylı, tüm bilgileri içeren doğrulama (sertifika zinciri, policy bilgisi, vb.)
+- ✅ **Çoklu İmza Desteği** - Tek dokümanda birden fazla imza
 - ✅ **Docker Desteği** - Kolay deployment
 - ✅ **Prometheus Metrics** - Monitoring ve metrikleme
+- ✅ **RESTful API** - OpenAPI/Scalar dokümantasyonu
 - ✅ **OpenAPI Dokümantasyonu** - Swagger UI alternatifi
 
 ## 🚀 Hızlı Başlangıç

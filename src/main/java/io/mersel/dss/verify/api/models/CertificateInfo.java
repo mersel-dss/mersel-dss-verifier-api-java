@@ -22,9 +22,11 @@ public class CertificateInfo {
     private String signatureAlgorithm;
     private boolean trusted;
     private boolean expired;
+    private boolean valid;
     private boolean revoked;
     private String revocationReason;
     private Date revocationTime;
+    private Date revocationDate;
 
     // Getters and Setters
     public String getCommonName() {
@@ -153,6 +155,22 @@ public class CertificateInfo {
 
     public void setSubject(String subject) {
         this.subject = subject;
+    }
+
+    public boolean isValid() {
+        return valid;
+    }
+
+    public void setValid(boolean valid) {
+        this.valid = valid;
+    }
+
+    public Date getRevocationDate() {
+        return revocationDate;
+    }
+
+    public void setRevocationDate(Date revocationDate) {
+        this.revocationDate = revocationDate;
     }
 }
 

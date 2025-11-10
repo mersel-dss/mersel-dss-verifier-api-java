@@ -26,6 +26,9 @@ public class SignatureInfo {
     private String indication; // TOTAL_PASSED, PASSED, FAILED, etc.
     private String subIndication; // Sub-indication if any
     private QualificationDetails qualificationDetails; // Yasal seviye bilgileri
+    private Integer timestampCount; // Timestamp sayısı
+    private String policyIdentifier; // Policy ID (XAdES-EPES için)
+    private ValidationDetails validationDetails; // Detaylı validation bilgileri
 
     // Getters and Setters
     public String getSignatureId() {
@@ -154,6 +157,30 @@ public class SignatureInfo {
 
     public void setQualificationDetails(QualificationDetails qualificationDetails) {
         this.qualificationDetails = qualificationDetails;
+    }
+
+    public Integer getTimestampCount() {
+        return timestampCount;
+    }
+
+    public void setTimestampCount(Integer timestampCount) {
+        this.timestampCount = timestampCount;
+    }
+
+    public String getPolicyIdentifier() {
+        return policyIdentifier;
+    }
+
+    public void setPolicyIdentifier(String policyIdentifier) {
+        this.policyIdentifier = policyIdentifier;
+    }
+
+    public ValidationDetails getValidationDetails() {
+        return validationDetails;
+    }
+
+    public void setValidationDetails(ValidationDetails validationDetails) {
+        this.validationDetails = validationDetails;
     }
 }
 
