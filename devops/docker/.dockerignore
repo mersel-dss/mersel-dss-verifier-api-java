@@ -1,0 +1,71 @@
+# Build optimization - exclude these from Docker context
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# IDE
+.idea
+.vscode
+*.iml
+*.swp
+*.swo
+
+# Build outputs
+target/
+build/
+dist/
+out/
+*.class
+
+# Logs
+logs/
+*.log
+
+# Test files
+test-reports/
+coverage/
+
+# OS
+.DS_Store
+Thumbs.db
+*.tmp
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Documentation
+*.md
+docs/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Dependencies (will be downloaded during build)
+node_modules/
+.m2/
+.gradle/
+
+# Certificates (sensitive)
+*.pfx
+*.p12
+*.key
+*.pem
+!test-certs/
+
+# Large files
+*.jar
+*.war
+*.ear
+!gradle-wrapper.jar
+

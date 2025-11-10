@@ -2,34 +2,40 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
   external_labels:
-    cluster: 'docker-compose'
-    environment: 'development'
+    cluster: 'verify-api'
+    environment: 'production'
 
 # Alertmanager configuration
 alerting:
   alertmanagers:
     - static_configs:
         - targets:
-            - alertmanager:9093
+          - alertmanager:9093
 
-# Load rules once and periodically evaluate them
+# Load rules
 rule_files:
-  - 'alerts.yml'
+  - "alerts.yml"
 
-# Scrape configurations
 scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
   # Verify API metrics
   - job_name: 'verify-api'
     metrics_path: '/actuator/prometheus'
-    scrape_interval: 15s
-    scrape_timeout: 10s
     static_configs:
       - targets: ['verify-api:8086']
         labels:
           application: 'verify-api'
-          service: 'signature-verification'
+          service: 'verification'
+    scrape_interval: 10s
+    scrape_timeout: 5s
 
-  # Prometheus self-monitoring
-  - job_name: 'prometheus'
+  # Verify API health
+  - job_name: 'verify-api-health'
+    metrics_path: '/actuator/health'
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: ['verify-api:8086']
+    scrape_interval: 30s
