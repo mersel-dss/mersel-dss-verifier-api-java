@@ -119,8 +119,8 @@ public class GlobalExceptionHandler {
         
         ErrorResponse error = new ErrorResponse(
             "INTERNAL_ERROR",
-            "Bir hata oluştu: " + ex.getMessage(),
-            "Beklenmeyen bir hata oluştu"
+            "Beklenmeyen bir hata oluştu",
+            "Hata detayı: " + ex.getMessage()
         );
         error.setPath(request.getDescription(false).replace("uri=", ""));
         
