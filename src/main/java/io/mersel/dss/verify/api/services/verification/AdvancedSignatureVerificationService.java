@@ -28,9 +28,14 @@ import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateServic
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import javax.annotation.PostConstruct;
+import java.io.InputStream;
 import java.util.*;
 
 /**
@@ -51,6 +56,97 @@ public class AdvancedSignatureVerificationService {
 
     @Autowired
     private VerificationConfiguration config;
+
+    @Autowired
+    private ResourceLoader resourceLoader;
+
+    // Built-in policy profilleri. signer-strict default — imzacı için
+    // OCSP/CRL FAIL, ara CA için WARN. strict — eIDAS-QES paralelinde
+    // her katmanda FAIL.
+    static final String PROFILE_SIGNER_STRICT = "signer-strict";
+    static final String PROFILE_STRICT = "strict";
+    private static final Set<String> KNOWN_PROFILES = new LinkedHashSet<>(
+            Arrays.asList(PROFILE_SIGNER_STRICT, PROFILE_STRICT));
+    private static final String POLICY_RESOURCE_TEMPLATE =
+            "classpath:policy/kamusm-%s-constraint.xml";
+
+    /**
+     * Tam custom validation policy XML. <strong>Önceliklidir</strong>:
+     * set edilmişse {@link #policyProfile} ignore edilir.
+     *
+     * <p>Spring resource paterni: <code>classpath:</code>, <code>file:</code>,
+     * <code>http(s):</code>. Üretimde tipik kullanım:
+     * <code>file:/etc/mersel-dss-verify/policy.xml</code> (k8s secret/configmap
+     * ile mount).</p>
+     */
+    @Value("${dss.policy.path:}")
+    private String policyPath;
+
+    /**
+     * Built-in policy profili. Geçerli değerler:
+     * <ul>
+     *   <li><code>signer-strict</code> (default) — Mali Mühür / KamuSM üretim
+     *       senaryosu: imzacı için OCSP/CRL FAIL, ara CA için WARN.</li>
+     *   <li><code>strict</code> — eIDAS-QES paraleli, her katmanda FAIL.</li>
+     * </ul>
+     *
+     * <p>Bilinmeyen değer verilirse default'a düşülür ve startup log'unda
+     * <code>WARN</code> basılır — silent fallback yapmıyoruz.</p>
+     */
+    @Value("${dss.policy.profile:signer-strict}")
+    private String policyProfile;
+
+    /**
+     * Startup-time sanity check: kullanıcının seçtiği policy + online
+     * validation kombosu pratikte anlamlı mı diye uyarır. Validation karar
+     * mantığına hiç dokunmaz — sadece operatöre işaret bırakır.
+     *
+     * <p>Riskli kombinasyonlar:</p>
+     * <ul>
+     *   <li><b>profile=signer-strict + online-validation=false</b> →
+     *       İmzacı için OCSP/CRL FAIL ama online fetch kapalı; her doğrulama
+     *       INDETERMINATE/NO_REVOCATION_DATA dönecek. Tipik unutkanlık.</li>
+     *   <li><b>profile=strict + online-validation=false</b> → aynı problem,
+     *       hem de tüm katmanlarda.</li>
+     *   <li><b>dss.policy.path set</b> → custom XML kullanıcının
+     *       sorumluluğunda; bilgi log'u yeter.</li>
+     * </ul>
+     */
+    @PostConstruct
+    void warnOnSuspiciousPolicyConfiguration() {
+        boolean customPath = policyPath != null && !policyPath.trim().isEmpty();
+        boolean online = config != null && config.isOnlineValidationEnabled();
+        String effectiveProfile = (policyProfile != null)
+                ? policyProfile.trim().toLowerCase(Locale.ROOT) : "";
+
+        if (customPath) {
+            logger.info("DSS policy: custom XML kullanılıyor (dss.policy.path='{}'). "
+                    + "Profile parametresi yok sayılıyor.", policyPath);
+            return;
+        }
+
+        if (!KNOWN_PROFILES.contains(effectiveProfile)) {
+            logger.warn("dss.policy.profile='{}' tanımsız; ilk doğrulamada default '{}' "
+                            + "profiline düşülecek (operasyonel kontrol önerilir).",
+                    policyProfile, PROFILE_SIGNER_STRICT);
+            effectiveProfile = PROFILE_SIGNER_STRICT;
+        }
+
+        logger.info("DSS validation policy: profile='{}', online-validation={}",
+                effectiveProfile, online);
+
+        if (!online && (PROFILE_SIGNER_STRICT.equals(effectiveProfile)
+                || PROFILE_STRICT.equals(effectiveProfile))) {
+            logger.warn(""
+                    + "GUVENLIK UYARISI: dss.policy.profile='{}' imzaci/CA icin "
+                    + "OCSP veya CRL revocation verisi gerektiriyor, fakat "
+                    + "verification.online-validation-enabled=false. Bu kombosyonla "
+                    + "her dogrulama 'INDETERMINATE/NO_REVOCATION_DATA' donecektir. "
+                    + "Online validation'i acin VEYA test/CI ortami icin "
+                    + "dss.policy.path ile permissive bir XML mount edin.",
+                    effectiveProfile);
+        }
+    }
 
     /**
      * İmzalı dokümanı doğrular
@@ -92,8 +188,28 @@ public class AdvancedSignatureVerificationService {
             CertificateVerifier certificateVerifier = createAdvancedCertificateVerifier();
             validator.setCertificateVerifier(certificateVerifier);
 
-            // Doğrulama yap
-            Reports reports = validator.validateDocument();
+            // Doğrulama yap. Validation policy resolution explicit ve
+            // fail-fast (bkz. openValidationPolicyStream JavaDoc) — sessiz
+            // fallback yok, çünkü yanlış policy ile valid göstermek prod
+            // riski yaratır. Default profil signer-strict (KamuSM Mali Mühür
+            // için imzacı OCSP/CRL zorunlu, ara CA WARN).
+            Reports reports;
+            try (InputStream policyStream = openValidationPolicyStream()) {
+                reports = validator.validateDocument(policyStream);
+            }
+
+            // Detaylı DSS raporu: yalnızca DEBUG seviyesinde logla. Trust chain
+            // problemlerini ayıklarken hızlıca açılabilir (logback level=DEBUG),
+            // ama varsayılan üretim log'larını kirletmez.
+            if (logger.isDebugEnabled()) {
+                try {
+                    ValidationReportLogger.logDetailedReport(
+                            reports,
+                            signedDocument != null ? signedDocument.getOriginalFilename() : "<unknown>");
+                } catch (Exception logEx) {
+                    logger.warn("ValidationReportLogger failed: {}", logEx.getMessage());
+                }
+            }
 
             // Sonuçları parse et
             VerificationResult result = parseAdvancedVerificationResult(reports, level);
@@ -106,6 +222,82 @@ public class AdvancedSignatureVerificationService {
         } catch (Exception e) {
             logger.error("Advanced signature verification failed: {}", e.getMessage(), e);
             throw new VerificationException("İmza doğrulama hatası: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Validator'a verilecek validation policy XML'ini açar.
+     *
+     * <p><b>Resolution algoritması</b> (deterministik, audit edilebilir):</p>
+     * <ol>
+     *   <li><code>dss.policy.path</code> set ise → onu yükle. Yoksa veya
+     *       erişilemezse <strong>fail-fast</strong> ({@code null} dönmek
+     *       yerine {@link VerificationException} atılır). Operatör explicit
+     *       bir path verdiyse sessizce başka bir XML'e düşmek riskli olur —
+     *       imzayı yanlış policy ile valid göstermemek için bilinçli karar.</li>
+     *   <li>Path yoksa <code>dss.policy.profile</code> kullanılır. Bilinen
+     *       profil değilse default ({@code signer-strict})'e düşülür ve
+     *       <strong>WARN</strong> loglanır.</li>
+     *   <li>Profil XML'i classpath'te bulunamazsa (build hatası senaryosu)
+     *       yine fail-fast: DSS default policy'sine sessiz düşmek prod'da
+     *       güvenlik gerilemesi yaratır.</li>
+     * </ol>
+     *
+     * @return açık {@link InputStream} (çağıran tarafın kapatması gerekir)
+     * @throws VerificationException explicit yapılandırma yüklenemediğinde
+     */
+    InputStream openValidationPolicyStream() {
+        // 1) Explicit path → fail-fast yükle
+        if (policyPath != null && !policyPath.trim().isEmpty()) {
+            String pathToUse = policyPath.trim();
+            try {
+                Resource resource = resourceLoader.getResource(pathToUse);
+                if (!resource.exists()) {
+                    throw new VerificationException(
+                            "dss.policy.path olarak verilen kaynak bulunamadı: "
+                                    + pathToUse + ". Operatör explicit XML belirtti, "
+                                    + "sessiz fallback yapılmıyor.");
+                }
+                logger.info("Using custom validation policy from dss.policy.path={}", pathToUse);
+                return resource.getInputStream();
+            } catch (VerificationException ve) {
+                throw ve;
+            } catch (Exception e) {
+                throw new VerificationException(
+                        "dss.policy.path yüklenemedi (" + pathToUse + "): "
+                                + e.getMessage(), e);
+            }
+        }
+
+        // 2) Built-in profile
+        String requested = (policyProfile != null) ? policyProfile.trim().toLowerCase(Locale.ROOT) : "";
+        String effective = requested;
+        if (!KNOWN_PROFILES.contains(effective)) {
+            logger.warn("Bilinmeyen dss.policy.profile='{}' (geçerli değerler: {}). "
+                            + "Default '{}' profiline düşülüyor.",
+                    policyProfile, KNOWN_PROFILES, PROFILE_SIGNER_STRICT);
+            effective = PROFILE_SIGNER_STRICT;
+        }
+        String resourcePath = String.format(POLICY_RESOURCE_TEMPLATE, effective);
+        try {
+            Resource resource = resourceLoader.getResource(resourcePath);
+            if (!resource.exists()) {
+                // Build/packaging hatası — built-in profil XML'i jar'da olmalı.
+                // Sessiz DSS default'a düşmek prod güvenliğini zedeler.
+                throw new VerificationException(
+                        "Built-in policy profile XML'i sınıf yolunda yok: "
+                                + resourcePath + ". Jar build edilirken "
+                                + "src/main/resources/policy/ klasörüne eklendiğinden emin olun.");
+            }
+            logger.info("Using built-in validation policy profile '{}' ({})",
+                    effective, resourcePath);
+            return resource.getInputStream();
+        } catch (VerificationException ve) {
+            throw ve;
+        } catch (Exception e) {
+            throw new VerificationException(
+                    "Built-in policy profile XML'i okunamadı (" + resourcePath + "): "
+                            + e.getMessage(), e);
         }
     }
 
@@ -366,6 +558,16 @@ public class AdvancedSignatureVerificationService {
         certInfo.setRevoked(isRevoked);
         certInfo.setExpired(isExpired);
 
+        // Trust durumu — eski versiyonda hiç set edilmiyordu; UI tarafında her
+        // sertifika "trusted=false" görünüyordu. DSS diagnostic data zaten root
+        // trust source'taki eşleşmeyi `CertificateWrapper.isTrusted()` ile
+        // raporluyor, doğrudan oradan al.
+        try {
+            certInfo.setTrusted(certWrapper.isTrusted());
+        } catch (Exception ignore) {
+            // Eski DSS sürümleri için defensive — sessizce false bırak.
+        }
+
         return certInfo;
     }
 
@@ -411,9 +613,15 @@ public class AdvancedSignatureVerificationService {
         );
 
         if (signatureWrapper != null) {
-            // Sertifika zinciri
-            details.setCertificateChainValid(!signatureWrapper.isSignatureIntact());
-            
+            // Sertifika zinciri — DİKKAT: önceki implementation
+            //   details.setCertificateChainValid(!signatureWrapper.isSignatureIntact());
+            // şeklindeydi, bu açık bir typo: imza sağlamsa zincir invalid mantığı
+            // çıkıyor ve dış istemciyi yanıltıyordu. Doğru kaynak: DSS'in
+            // diagnostic data'sındaki trusted-chain bayrağı. Imza zincirinin
+            // tepeye kadar tamamlanmış ve trust source ile eşleşmiş olması
+            // gerçek "chain valid" anlamına gelir.
+            details.setCertificateChainValid(signatureWrapper.isTrustedChain());
+
             // Sertifika geçerliliği
             CertificateWrapper signingCert = signatureWrapper.getSigningCertificate();
             if (signingCert != null) {

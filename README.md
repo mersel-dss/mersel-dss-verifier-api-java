@@ -304,10 +304,51 @@ CUSTOM_ROOT_CERT_PATH=/path/to/root.cer  # Özel root sertifika (opsiyonel)
 #### Validation Configuration
 ```bash
 ONLINE_VALIDATION_ENABLED=true      # Online OCSP/CRL kontrolü
-VERIFICATION_POLICY=STRICT          # STRICT veya RELAXED
+VERIFICATION_STRICT_MODE=true       # Rapor seviyesi katılık: SubIndication varsa imza invalid sayılır
+                                    # (Not: Bu DSS policy XML değildir; DSS validation kuralları
+                                    #  için aşağıdaki "DSS Validation Policy" bölümüne bakın.)
 CERT_CACHE_TTL=3600                 # Sertifika cache süresi (saniye)
 CRL_CACHE_TTL=3600                  # CRL cache süresi (saniye)
 ```
+
+#### DSS Validation Policy
+
+Doğrulamada kullanılacak constraint XML'ini iki kademeli olarak seçer:
+
+```bash
+# 1) Built-in profil — değerler: signer-strict (DEFAULT) | strict
+DSS_POLICY_PROFILE=signer-strict
+
+# 2) Tam custom override — set edilirse DSS_POLICY_PROFILE ignore edilir
+#    Spring Resource paterni: classpath: | file: | http(s):
+DSS_POLICY_PATH=                    # boş = profil kullan
+# Production typical:
+# DSS_POLICY_PATH=file:/etc/mersel-dss-verify/policy.xml
+```
+
+| Profil          | İmzacı sertifika OCSP/CRL | Ara CA OCSP/CRL | TS signer OCSP/CRL | Ne zaman? |
+|-----------------|---------------------------|-----------------|--------------------|-----------|
+| `signer-strict` | **FAIL** (zorunlu)        | WARN            | WARN               | Mali Mühür / KamuSM üretim default'u. İptal kontrolü garanti, ara CA endpoint kesintilerinde yine validation devam eder. |
+| `strict`        | **FAIL**                  | **FAIL**        | **FAIL**           | eIDAS-QES paralel; online OCSP/CRL altyapısı kesintisiz olan ortamlar. |
+
+**Önemli:** `DSS_POLICY_PATH` ile verilen XML erişilemezse servis sessizce
+DSS default'una düşmez — `VerificationException` atar. Built-in profil XML
+jar'da yoksa da aynı şekilde fail-fast. Bilinmeyen `DSS_POLICY_PROFILE`
+değeri verilirse default `signer-strict`'e düşülür ve startup'ta **WARN**
+loglanır.
+
+**`DSS_POLICY_PROFILE` + `ONLINE_VALIDATION_ENABLED=false` kombinasyonu**
+risk yaratır: imzacı için OCSP/CRL FAIL ama online fetch kapalı →
+her doğrulama `INDETERMINATE/NO_REVOCATION_DATA` döner. Servis startup'ta
+bu kombinasyonu tespit edip uyarır. Test/CI ortamları için
+`DSS_POLICY_PATH` ile permissive bir XML mount edin.
+
+**Custom policy yazımı**: Built-in XML'ler `src/main/resources/policy/`
+altında tam yorumlu. CA / ara / imzacı / counter signature / timestamp
+katmanları için ayrı ayrı `RevocationDataAvailable`, `NotRevoked`,
+`AcceptableRevocationDataFound` vb. constraint'leri `FAIL/WARN/IGNORE`
+seviyesinde yapılandırabilirsiniz — DSS native policy şeması zaten
+katman bazlı (bkz. `SigningCertificate` ve `CACertificate` node'ları).
 
 ### Güvenilir Kök Sertifika Resolver Kullanımı
 

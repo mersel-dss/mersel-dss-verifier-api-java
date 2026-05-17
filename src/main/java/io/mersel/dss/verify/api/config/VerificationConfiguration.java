@@ -24,8 +24,15 @@ public class VerificationConfiguration {
     @Value("${verification.trusted-tsa-certificates:}")
     private String trustedTsaCertificates;
 
-    @Value("${VERIFICATION_POLICY:STRICT}")
-    private String verificationPolicy;
+    // NOT: Eski `VERIFICATION_POLICY=STRICT|RELAXED` property kaldırıldı.
+    // Hiçbir karar akışında okunmuyor, sessiz no-op olarak operatörleri
+    // yanıltıyordu. DSS validation davranışı artık `dss.policy.profile`
+    // (signer-strict|strict) + `dss.policy.path` (custom XML override)
+    // üzerinden yönetilir (bkz. AdvancedSignatureVerificationService).
+    // Rapor seviyesi katılık için `verification.strict-mode` aşağıda kalır
+    // — DSS DiagnosticData üzerinde subIndication/validationErrors gibi
+    // sinyalleri "valid mi değil mi" kararına nasıl yansıttığımızı kontrol
+    // eder; DSS policy XML'i ile ortogonal bir kavramdır.
 
     @Value("${CERT_CACHE_TTL:3600}")
     private int certCacheTtl;
@@ -54,10 +61,6 @@ public class VerificationConfiguration {
 
     public String getTrustedTsaCertificates() {
         return trustedTsaCertificates;
-    }
-
-    public String getVerificationPolicy() {
-        return verificationPolicy;
     }
 
     public int getCertCacheTtl() {

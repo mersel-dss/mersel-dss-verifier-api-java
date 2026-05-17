@@ -1,0 +1,599 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Mersel DSS Verify — KamuSM SIGNER-STRICT validation policy. (DEFAULT)
+
+    NE ZAMAN KULLAN
+    ───────────────
+    • Üretim default'u. Mali Mühür / NES sertifikalarıyla atılmış
+      imzaların doğrulamasında en yaygın senaryo.
+    • İmzacının iptal durumunun bilinmediği bir imzayı asla VALID
+      gösterme — fakat tüm zincir CA/intermediate seviyesindeki anlık
+      OCSP/CRL kesintilerini tek başına bir RED gerekçesi sayma.
+
+    POLİTİKA ÖZETİ
+    ──────────────
+    Asimetrik revocation yaklaşımı:
+
+      İmzacı (end-entity)     : FAIL — OCSP/CRL ZORUNLU.
+      Ara CA                  : WARN — eksikse raporlanır ama RED değil.
+      Root CA                 : DSS root için zaten kontrolü atlar
+                                (self-signed, depo yok).
+      Counter signature signer: FAIL — sayaç imzanın anlamı imzanın
+                                kendisiyle birebir aynı (kim, ne zaman,
+                                iptalli mi).
+      Timestamp signing cert  : WARN — TSA sertifika iptali nadirdir,
+                                ayrıca timestamp PROD'da çoğu zaman
+                                fetch edilemez (offline TSA durumu).
+
+    NEDEN BU AYRIM?
+    ───────────────
+    Mali Mühür kullanan kurum imza atarken iptal kontrolü yapmak ZORUNDA;
+    karşı taraf "ben bunu valid gördüm" diyemez eğer imza anında
+    sertifika iptalliyse. Ama KamuSM ara CA'larının OCSP/CRL uçları
+    zaman zaman bakım vs. nedenlerle düşer; bu kısa kesintiler yüzünden
+    valid bir e-Faturayı "indeterminate" göstermek operasyonel risk.
+
+    Trust chain (ProspectiveCertificateChain), kriptografik bütünlük
+    (SignatureIntact, ReferenceData*) ve NotExpired kontrolleri tüm
+    katmanlarda FAIL olarak korunur — bunlar revocation'dan bağımsız
+    ve müzakere edilemez.
+
+    Override paterni:
+      - profil değişikliği : dss.policy.profile=strict|signer-strict
+      - tam custom XML     : dss.policy.path=classpath:|file:|http(s)
+        (file: production'da harici mount için en yaygın seçenek)
+-->
+<ConstraintsParameters Name="Mersel KamuSM Signer-Strict Policy" xmlns="http://dss.esig.europa.eu/validation/policy">
+	<Description>KamuSM / Mali Mühür için production default doğrulama:
+		imzacı sertifika için CRL/OCSP zorunlu, intermediate CA için
+		WARN, root self-signed (DSS atlar). Trust chain ve kriptografik
+		bütünlük tüm katmanlarda katı.
+	</Description>
+	<ContainerConstraints>
+		<AcceptableContainerTypes Level="FAIL">
+			<Id>ASiC-S</Id>
+			<Id>ASiC-E</Id>
+		</AcceptableContainerTypes>
+		<MimeTypeFilePresent Level="INFORM" />
+		<AcceptableMimeTypeFileContent Level="WARN">
+			<Id>application/vnd.etsi.asic-s+zip</Id>
+			<Id>application/vnd.etsi.asic-e+zip</Id>
+		</AcceptableMimeTypeFileContent>
+		<ManifestFilePresent Level="FAIL" />
+		<SignedFilesPresent Level="FAIL" />
+		<FilenameAdherence Level="WARN" />
+		<AllFilesSigned Level="WARN" />
+	</ContainerConstraints>
+	<PDFAConstraints>
+	</PDFAConstraints>
+	<SignatureConstraints>
+		<StructuralValidation Level="WARN" />
+		<AcceptablePolicies Level="FAIL">
+			<Id>ANY_POLICY</Id>
+			<Id>NO_POLICY</Id>
+		</AcceptablePolicies>
+		<PolicyAvailable Level="INFORM" />
+		<PolicyHashMatch Level="WARN" />
+		<AcceptableFormats Level="FAIL">
+			<Id>*</Id>
+		</AcceptableFormats>
+		<BasicSignatureConstraints>
+			<ReferenceDataExistence Level="FAIL" />
+			<ReferenceDataIntact Level="FAIL" />
+			<ReferenceDataNameMatch Level="WARN" />
+			<ManifestEntryObjectExistence Level="WARN" />
+			<ManifestEntryObjectGroup Level="WARN" />
+			<ManifestEntryObjectIntact Level="FAIL" />
+			<ManifestEntryNameMatch Level="WARN" />
+			<SignatureIntact Level="FAIL" />
+			<SignatureDuplicated Level="FAIL" />
+			<ProspectiveCertificateChain Level="FAIL" />
+			<SignerInformationStore Level="FAIL" />
+			<ByteRange Level="FAIL" />
+			<ByteRangeCollision Level="WARN" />
+			<PdfSignatureDictionary Level="FAIL" />
+			<PdfPageDifference Level="FAIL" />
+			<PdfAnnotationOverlap Level="WARN" />
+			<PdfVisualDifference Level="WARN" />
+			<DocMDP Level="WARN" />
+			<FieldMDP Level="WARN" />
+			<SigFieldLock Level="WARN" />
+			<UndefinedChanges Level="WARN" />
+			<SigningCertificate>
+				<Recognition Level="FAIL" />
+				<Signature Level="FAIL" />
+				<NotExpired Level="FAIL" />
+				<SunsetDate Level="FAIL" />
+				<AuthorityInfoAccessPresent Level="WARN" />
+				<RevocationDataSkip Level="INFORM">
+					<CertificateExtensions>
+						<Id>0.4.0.194121.2.1</Id>
+						<Id>2.5.29.56</Id>
+					</CertificateExtensions>
+				</RevocationDataSkip>
+				<RevocationInfoAccessPresent Level="WARN" />
+				<!-- İMZACI: revocation verisi ZORUNLU (FAIL) -->
+				<RevocationDataAvailable Level="FAIL" />
+				<AcceptableRevocationDataFound Level="FAIL" />
+				<CRLNextUpdatePresent Level="WARN" />
+				<RevocationFreshness Level="IGNORE" Unit="DAYS" Value="0" />
+				<KeyUsage Level="WARN">
+					<Id>nonRepudiation</Id>
+				</KeyUsage>
+				<PolicyTree Level="WARN" />
+				<NameConstraints Level="WARN" />
+				<NoRevAvail Level="WARN" />
+				<SupportedCriticalExtensions Level="WARN">
+					<Id>2.5.29.15</Id>
+					<Id>2.5.29.32</Id>
+					<Id>2.5.29.17</Id>
+					<Id>2.5.29.19</Id>
+					<Id>2.5.29.30</Id>
+					<Id>2.5.29.36</Id>
+					<Id>2.5.29.37</Id>
+					<Id>2.5.29.31</Id>
+					<Id>2.5.29.54</Id>
+					<Id>1.3.6.1.5.5.7.1.3</Id>
+				</SupportedCriticalExtensions>
+				<ForbiddenExtensions Level="FAIL">
+					<Id>1.3.6.1.5.5.7.48.1.5</Id>
+				</ForbiddenExtensions>
+				<IssuerName Level="FAIL" />
+				<SerialNumberPresent Level="WARN" />
+				<!-- İMZACI: iptal durumu ZORUNLU -->
+				<NotRevoked Level="FAIL" />
+				<NotOnHold Level="FAIL" />
+				<RevocationIssuerNotExpired Level="FAIL" />
+				<NotSelfSigned Level="WARN" />
+				<UsePseudonym Level="INFORM" />
+				<Cryptographic />
+			</SigningCertificate>
+			<CACertificate>
+				<Signature Level="FAIL" />
+				<NotExpired Level="FAIL" />
+				<SunsetDate Level="FAIL" />
+				<!-- ARA CA: revocation verisi opsiyonel (WARN) -->
+				<RevocationDataAvailable Level="WARN" />
+				<AcceptableRevocationDataFound Level="WARN" />
+				<CRLNextUpdatePresent Level="WARN" />
+				<RevocationFreshness Level="IGNORE" Unit="DAYS" Value="0" />
+				<CA Level="FAIL" />
+				<MaxPathLength Level="FAIL" />
+				<KeyUsage Level="FAIL">
+					<Id>keyCertSign</Id>
+				</KeyUsage>
+				<PolicyTree Level="WARN" />
+				<NameConstraints Level="WARN" />
+				<SupportedCriticalExtensions Level="WARN">
+					<Id>2.5.29.15</Id>
+					<Id>2.5.29.32</Id>
+					<Id>2.5.29.17</Id>
+					<Id>2.5.29.19</Id>
+					<Id>2.5.29.30</Id>
+					<Id>2.5.29.36</Id>
+					<Id>2.5.29.37</Id>
+					<Id>2.5.29.31</Id>
+					<Id>2.5.29.54</Id>
+					<Id>1.3.6.1.5.5.7.1.3</Id>
+				</SupportedCriticalExtensions>
+				<ForbiddenExtensions Level="FAIL">
+					<Id>1.3.6.1.5.5.7.48.1.5</Id>
+					<Id>2.5.29.56</Id>
+				</ForbiddenExtensions>
+				<IssuerName Level="FAIL" />
+				<NotRevoked Level="WARN" />
+				<NotOnHold Level="WARN" />
+				<Cryptographic />
+			</CACertificate>
+			<Cryptographic />
+		</BasicSignatureConstraints>
+		<SignedAttributes>
+			<SigningCertificatePresent Level="WARN" />
+			<UnicitySigningCertificate Level="WARN" />
+			<SigningCertificateRefersCertificateChain Level="WARN" />
+			<SigningCertificateDigestAlgorithm Level="WARN" />
+			<CertDigestPresent Level="FAIL" />
+			<CertDigestMatch Level="FAIL" />
+			<IssuerSerialMatch Level="WARN" />
+			<KeyIdentifierMatch Level="WARN" />
+			<SigningTime Level="FAIL" />
+			<MessageDigestOrSignedPropertiesPresent Level="FAIL" />
+			<EllipticCurveKeySize Level="WARN" />
+		</SignedAttributes>
+		<UnsignedAttributes>
+		</UnsignedAttributes>
+	</SignatureConstraints>
+	<CounterSignatureConstraints>
+		<BasicSignatureConstraints>
+			<ReferenceDataExistence Level="FAIL" />
+			<ReferenceDataIntact Level="FAIL" />
+			<ReferenceDataNameMatch Level="WARN" />
+			<ManifestEntryObjectExistence Level="WARN" />
+			<ManifestEntryObjectGroup Level="WARN" />
+			<ManifestEntryObjectIntact Level="FAIL" />
+			<ManifestEntryNameMatch Level="WARN" />
+			<SignatureIntact Level="FAIL" />
+			<SignatureDuplicated Level="FAIL" />
+			<ProspectiveCertificateChain Level="FAIL" />
+			<SigningCertificate>
+				<Recognition Level="FAIL" />
+				<Signature Level="FAIL" />
+				<NotExpired Level="FAIL" />
+				<SunsetDate Level="FAIL" />
+				<AuthorityInfoAccessPresent Level="WARN" />
+				<RevocationDataSkip Level="INFORM">
+					<CertificateExtensions>
+						<Id>0.4.0.194121.2.1</Id>
+						<Id>2.5.29.56</Id>
+					</CertificateExtensions>
+				</RevocationDataSkip>
+				<RevocationInfoAccessPresent Level="WARN" />
+				<!-- SAYAÇ İMZASI: imzacı kadar kritik, FAIL -->
+				<RevocationDataAvailable Level="FAIL" />
+				<AcceptableRevocationDataFound Level="FAIL" />
+				<CRLNextUpdatePresent Level="WARN" />
+				<RevocationFreshness Level="IGNORE" Unit="DAYS" Value="0" />
+				<KeyUsage Level="WARN">
+					<Id>nonRepudiation</Id>
+				</KeyUsage>
+				<PolicyTree Level="WARN" />
+				<NameConstraints Level="WARN" />
+				<NoRevAvail Level="WARN" />
+				<SupportedCriticalExtensions Level="WARN">
+					<Id>2.5.29.15</Id>
+					<Id>2.5.29.32</Id>
+					<Id>2.5.29.17</Id>
+					<Id>2.5.29.19</Id>
+					<Id>2.5.29.30</Id>
+					<Id>2.5.29.36</Id>
+					<Id>2.5.29.37</Id>
+					<Id>2.5.29.31</Id>
+					<Id>2.5.29.54</Id>
+					<Id>1.3.6.1.5.5.7.1.3</Id>
+				</SupportedCriticalExtensions>
+				<ForbiddenExtensions Level="FAIL">
+					<Id>1.3.6.1.5.5.7.48.1.5</Id>
+				</ForbiddenExtensions>
+				<IssuerName Level="FAIL" />
+				<SerialNumberPresent Level="WARN" />
+				<NotRevoked Level="FAIL" />
+				<NotOnHold Level="FAIL" />
+				<NotSelfSigned Level="WARN" />
+				<UsePseudonym Level="INFORM" />
+				<Cryptographic />
+			</SigningCertificate>
+			<CACertificate>
+				<Signature Level="FAIL" />
+				<NotExpired Level="FAIL" />
+				<SunsetDate Level="FAIL" />
+				<RevocationDataAvailable Level="WARN" />
+				<AcceptableRevocationDataFound Level="WARN" />
+				<CRLNextUpdatePresent Level="WARN" />
+				<RevocationFreshness Level="IGNORE" Unit="DAYS" Value="0" />
+				<CA Level="FAIL" />
+				<MaxPathLength Level="FAIL" />
+				<KeyUsage Level="FAIL">
+					<Id>keyCertSign</Id>
+				</KeyUsage>
+				<PolicyTree Level="WARN" />
+				<NameConstraints Level="WARN" />
+				<SupportedCriticalExtensions Level="WARN">
+					<Id>2.5.29.15</Id>
+					<Id>2.5.29.32</Id>
+					<Id>2.5.29.17</Id>
+					<Id>2.5.29.19</Id>
+					<Id>2.5.29.30</Id>
+					<Id>2.5.29.36</Id>
+					<Id>2.5.29.37</Id>
+					<Id>2.5.29.31</Id>
+					<Id>2.5.29.54</Id>
+					<Id>1.3.6.1.5.5.7.1.3</Id>
+				</SupportedCriticalExtensions>
+				<ForbiddenExtensions Level="FAIL">
+					<Id>1.3.6.1.5.5.7.48.1.5</Id>
+					<Id>2.5.29.56</Id>
+				</ForbiddenExtensions>
+				<IssuerName Level="FAIL" />
+				<NotRevoked Level="WARN" />
+				<NotOnHold Level="WARN" />
+				<Cryptographic />
+			</CACertificate>
+			<Cryptographic />
+		</BasicSignatureConstraints>
+		<SignedAttributes>
+			<SigningCertificatePresent Level="WARN" />
+			<UnicitySigningCertificate Level="WARN" />
+			<SigningCertificateRefersCertificateChain Level="WARN" />
+			<SigningCertificateDigestAlgorithm Level="WARN" />
+			<CertDigestPresent Level="FAIL" />
+			<CertDigestMatch Level="FAIL" />
+			<IssuerSerialMatch Level="WARN" />
+			<KeyIdentifierMatch Level="WARN" />
+			<SigningTime Level="FAIL" />
+			<MessageDigestOrSignedPropertiesPresent Level="FAIL" />
+			<EllipticCurveKeySize Level="WARN" />
+		</SignedAttributes>
+	</CounterSignatureConstraints>
+	<Timestamp>
+		<TimestampDelay Level="IGNORE" Unit="DAYS" Value="0" />
+		<RevocationTimeAgainstBestSignatureTime	Level="FAIL" />
+		<BestSignatureTimeBeforeExpirationDateOfSigningCertificate Level="FAIL" />
+		<Coherence Level="WARN" />
+		<BasicSignatureConstraints>
+			<ReferenceDataExistence Level="FAIL" />
+			<ReferenceDataIntact Level="FAIL" />
+			<ReferenceDataNameMatch Level="WARN" />
+			<ManifestEntryObjectExistence Level="WARN" />
+			<ManifestEntryObjectGroup Level="WARN" />
+			<ManifestEntryObjectIntact Level="FAIL" />
+			<ManifestEntryNameMatch Level="WARN" />
+			<SignatureIntact Level="FAIL" />
+			<ProspectiveCertificateChain Level="FAIL" />
+			<ByteRange Level="FAIL" />
+			<ByteRangeCollision Level="WARN" />
+			<PdfSignatureDictionary Level="FAIL" />
+			<PdfPageDifference Level="FAIL" />
+			<PdfAnnotationOverlap Level="WARN" />
+			<PdfVisualDifference Level="WARN" />
+			<DocMDP Level="WARN" />
+			<FieldMDP Level="WARN" />
+			<SigFieldLock Level="WARN" />
+			<UndefinedChanges Level="WARN" />
+			<SigningCertificate>
+				<Recognition Level="FAIL" />
+				<Signature Level="FAIL" />
+				<NotExpired Level="FAIL" />
+				<SunsetDate Level="FAIL" />
+				<!-- TSA: TS sertifika iptali nadirdir + offline TSA durumu, WARN -->
+				<RevocationDataAvailable Level="WARN" />
+				<AcceptableRevocationDataFound Level="WARN" />
+				<CRLNextUpdatePresent Level="WARN" />
+				<RevocationFreshness Level="IGNORE" Unit="DAYS" Value="0" />
+				<ExtendedKeyUsage Level="FAIL">
+					<Id>timeStamping</Id>
+				</ExtendedKeyUsage>
+				<PolicyTree Level="WARN" />
+				<NameConstraints Level="WARN" />
+				<SupportedCriticalExtensions Level="WARN">
+					<Id>2.5.29.15</Id>
+					<Id>2.5.29.32</Id>
+					<Id>2.5.29.17</Id>
+					<Id>2.5.29.19</Id>
+					<Id>2.5.29.30</Id>
+					<Id>2.5.29.36</Id>
+					<Id>2.5.29.37</Id>
+					<Id>2.5.29.31</Id>
+					<Id>2.5.29.54</Id>
+					<Id>1.3.6.1.5.5.7.1.3</Id>
+				</SupportedCriticalExtensions>
+				<ForbiddenExtensions Level="FAIL">
+					<Id>1.3.6.1.5.5.7.48.1.5</Id>
+				</ForbiddenExtensions>
+				<IssuerName Level="FAIL" />
+				<NotRevoked Level="WARN" />
+				<NotOnHold Level="WARN" />
+				<NotSelfSigned Level="WARN" />
+				<Cryptographic />
+			</SigningCertificate>
+			<CACertificate>
+				<Signature Level="FAIL" />
+				<NotExpired Level="FAIL" />
+				<SunsetDate Level="FAIL" />
+				<RevocationDataAvailable Level="WARN" />
+				<AcceptableRevocationDataFound Level="WARN" />
+				<CRLNextUpdatePresent Level="WARN" />
+				<RevocationFreshness Level="IGNORE" Unit="DAYS" Value="0" />
+				<CA Level="FAIL" />
+				<MaxPathLength Level="FAIL" />
+				<KeyUsage Level="FAIL">
+					<Id>keyCertSign</Id>
+				</KeyUsage>
+				<PolicyTree Level="WARN" />
+				<NameConstraints Level="WARN" />
+				<SupportedCriticalExtensions Level="WARN">
+					<Id>2.5.29.15</Id>
+					<Id>2.5.29.32</Id>
+					<Id>2.5.29.17</Id>
+					<Id>2.5.29.19</Id>
+					<Id>2.5.29.30</Id>
+					<Id>2.5.29.36</Id>
+					<Id>2.5.29.37</Id>
+					<Id>2.5.29.31</Id>
+					<Id>2.5.29.54</Id>
+					<Id>1.3.6.1.5.5.7.1.3</Id>
+				</SupportedCriticalExtensions>
+				<ForbiddenExtensions Level="FAIL">
+					<Id>1.3.6.1.5.5.7.48.1.5</Id>
+					<Id>2.5.29.56</Id>
+				</ForbiddenExtensions>
+				<IssuerName Level="FAIL" />
+				<NotRevoked Level="WARN" />
+				<NotOnHold Level="WARN" />
+				<Cryptographic />
+			</CACertificate>
+			<Cryptographic />
+		</BasicSignatureConstraints>
+		<SignedAttributes>
+			<SigningCertificatePresent Level="WARN" />
+			<SigningCertificateRefersCertificateChain Level="WARN" />
+			<CertDigestPresent Level="WARN" />
+			<IssuerSerialMatch Level="WARN" />
+		</SignedAttributes>
+		<TSAGeneralNameContentMatch Level="WARN" />
+		<AtsHashIndex Level="WARN" />
+		<ContainerSignedAndTimestampedFilesCovered Level="FAIL" />
+	</Timestamp>
+	<Revocation>
+		<UnknownStatus Level="FAIL" />
+		<ThisUpdatePresent Level="FAIL" />
+		<RevocationIssuerKnown Level="FAIL" />
+		<RevocationIssuerValidAtProductionTime Level="FAIL" />
+		<RevocationAfterCertificateIssuance Level="FAIL" />
+		<RevocationHasInformationAboutCertificate Level="FAIL" />
+		<OCSPResponderIdMatch Level="FAIL" />
+		<SelfIssuedOCSP Level="WARN" />
+		<BasicSignatureConstraints>
+			<ReferenceDataExistence Level="FAIL" />
+			<ReferenceDataIntact Level="FAIL" />
+			<SignatureIntact Level="FAIL" />
+			<ProspectiveCertificateChain Level="FAIL" />
+			<SigningCertificate>
+				<Recognition Level="FAIL" />
+				<Signature Level="FAIL" />
+				<NotExpired Level="FAIL" />
+				<SunsetDate Level="FAIL" />
+				<RevocationDataSkip Level="IGNORE">
+					<CertificateExtensions>
+						<Id>1.3.6.1.5.5.7.48.1.5</Id>
+					</CertificateExtensions>
+				</RevocationDataSkip>
+				<RevocationDataAvailable Level="FAIL" />
+				<AcceptableRevocationDataFound Level="FAIL" />
+				<CRLNextUpdatePresent Level="WARN" />
+				<RevocationFreshness Level="IGNORE" Unit="DAYS" Value="0" />
+				<PolicyTree Level="WARN" />
+				<NameConstraints Level="WARN" />
+				<SupportedCriticalExtensions Level="WARN">
+					<Id>2.5.29.15</Id>
+					<Id>2.5.29.32</Id>
+					<Id>2.5.29.17</Id>
+					<Id>2.5.29.19</Id>
+					<Id>2.5.29.30</Id>
+					<Id>2.5.29.36</Id>
+					<Id>2.5.29.37</Id>
+					<Id>2.5.29.31</Id>
+					<Id>2.5.29.54</Id>
+					<Id>1.3.6.1.5.5.7.1.3</Id>
+					<Id>1.3.6.1.5.5.7.48.1.5</Id>
+				</SupportedCriticalExtensions>
+				<IssuerName Level="FAIL" />
+				<NotRevoked Level="FAIL" />
+				<NotOnHold Level="FAIL" />
+				<Cryptographic />
+			</SigningCertificate>
+			<CACertificate>
+				<Signature Level="FAIL" />
+				<NotExpired Level="FAIL" />
+				<SunsetDate Level="FAIL" />
+				<RevocationDataAvailable Level="WARN" />
+				<AcceptableRevocationDataFound Level="WARN" />
+				<CRLNextUpdatePresent Level="WARN" />
+				<RevocationFreshness Level="IGNORE" Unit="DAYS" Value="0" />
+				<CA Level="FAIL" />
+				<MaxPathLength Level="FAIL" />
+				<KeyUsage Level="FAIL">
+					<Id>keyCertSign</Id>
+				</KeyUsage>
+				<PolicyTree Level="WARN" />
+				<NameConstraints Level="WARN" />
+				<SupportedCriticalExtensions Level="WARN">
+					<Id>2.5.29.15</Id>
+					<Id>2.5.29.32</Id>
+					<Id>2.5.29.17</Id>
+					<Id>2.5.29.19</Id>
+					<Id>2.5.29.30</Id>
+					<Id>2.5.29.36</Id>
+					<Id>2.5.29.37</Id>
+					<Id>2.5.29.31</Id>
+					<Id>2.5.29.54</Id>
+					<Id>1.3.6.1.5.5.7.1.3</Id>
+				</SupportedCriticalExtensions>
+				<ForbiddenExtensions Level="FAIL">
+					<Id>1.3.6.1.5.5.7.48.1.5</Id>
+					<Id>2.5.29.56</Id>
+				</ForbiddenExtensions>
+				<IssuerName Level="FAIL" />
+				<NotRevoked Level="WARN" />
+				<NotOnHold Level="WARN" />
+				<Cryptographic />
+			</CACertificate>
+			<Cryptographic />
+		</BasicSignatureConstraints>
+	</Revocation>
+	<EvidenceRecord>
+		<DataObjectExistence Level="FAIL" />
+		<DataObjectIntact Level="FAIL" />
+		<DataObjectFound Level="FAIL" />
+		<DataObjectGroup Level="WARN" />
+		<SignedFilesCovered Level="WARN" />
+		<ContainerSignedAndTimestampedFilesCovered Level="WARN" />
+		<HashTreeRenewal Level="FAIL" />
+		<Cryptographic />
+	</EvidenceRecord>
+	<Cryptographic Level="FAIL">
+		<AcceptableEncryptionAlgo>
+			<Algo>RSA</Algo>
+			<Algo>RSASSA-PSS</Algo>
+			<Algo>DSA</Algo>
+			<Algo>ECDSA</Algo>
+			<Algo>PLAIN-ECDSA</Algo>
+		</AcceptableEncryptionAlgo>
+		<MiniPublicKeySize>
+			<Algo Size="1024">DSA</Algo>
+			<Algo Size="786">RSA</Algo>
+			<Algo Size="786">RSASSA-PSS</Algo>
+			<Algo Size="160">ECDSA</Algo>
+			<Algo Size="160">PLAIN-ECDSA</Algo>
+		</MiniPublicKeySize>
+		<AcceptableDigestAlgo>
+			<Algo>MD5</Algo>
+			<Algo>SHA1</Algo>
+			<Algo>SHA224</Algo>
+			<Algo>SHA256</Algo>
+			<Algo>SHA384</Algo>
+			<Algo>SHA512</Algo>
+			<Algo>SHA3-256</Algo>
+			<Algo>SHA3-384</Algo>
+			<Algo>SHA3-512</Algo>
+			<Algo>RIPEMD160</Algo>
+			<Algo>WHIRLPOOL</Algo>
+		</AcceptableDigestAlgo>
+		<AlgoExpirationDate Level="FAIL" Format="yyyy-MM-dd" UpdateDate="2024-10-13" LevelAfterUpdate="WARN">
+			<Algo Date="2004-08-01">MD5</Algo>
+			<Algo Date="2012-08-01">SHA1</Algo>
+			<Algo Date="2029-01-01">SHA224</Algo>
+			<Algo>SHA256</Algo>
+			<Algo>SHA384</Algo>
+			<Algo>SHA512</Algo>
+			<Algo>SHA3-256</Algo>
+			<Algo>SHA3-384</Algo>
+			<Algo>SHA3-512</Algo>
+			<Algo Date="2014-08-01">RIPEMD160</Algo>
+			<Algo Date="2020-12-01">WHIRLPOOL</Algo>
+			<Algo Date="2015-12-01" Size="1024">DSA</Algo>
+			<Algo Date="2029-01-01" Size="1900">DSA</Algo>
+			<Algo Size="3000">DSA</Algo>
+			<Algo Date="2010-08-01" Size="786">RSA</Algo>
+			<Algo Date="2019-10-01" Size="1024">RSA</Algo>
+			<Algo Date="2019-10-01" Size="1536">RSA</Algo>
+			<Algo Date="2029-01-01" Size="1900">RSA</Algo>
+			<Algo Date="2029-01-01" Size="3000">RSA</Algo>
+			<Algo Date="2010-08-01" Size="786">RSASSA-PSS</Algo>
+			<Algo Date="2019-10-01" Size="1024">RSASSA-PSS</Algo>
+			<Algo Date="2019-10-01" Size="1536">RSASSA-PSS</Algo>
+			<Algo Date="2029-01-01" Size="1900">RSASSA-PSS</Algo>
+			<Algo Size="3000">RSASSA-PSS</Algo>
+			<Algo Date="2012-08-01" Size="160">ECDSA</Algo>
+			<Algo Date="2012-08-01" Size="163">ECDSA</Algo>
+			<Algo Date="2021-10-01" Size="224">ECDSA</Algo>
+			<Algo Size="256">ECDSA</Algo>
+			<Algo Date="2012-08-01" Size="160">PLAIN-ECDSA</Algo>
+			<Algo Date="2012-08-01" Size="163">PLAIN-ECDSA</Algo>
+			<Algo Date="2021-10-01" Size="224">PLAIN-ECDSA</Algo>
+			<Algo Size="256">PLAIN-ECDSA</Algo>
+		</AlgoExpirationDate>
+	</Cryptographic>
+
+	<Model Value="SHELL" />
+
+	<eIDAS>
+		<TLFreshness Level="WARN" Unit="HOURS" Value="6" />
+		<TLNotExpired Level="WARN" />
+		<TLWellSigned Level="WARN" />
+		<TLVersion Level="FAIL">
+			<Id>5</Id>
+			<Id>6</Id>
+		</TLVersion>
+		<TLStructure Level="WARN" />
+	</eIDAS>
+</ConstraintsParameters>

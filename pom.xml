@@ -12,7 +12,7 @@
     </parent>
     <groupId>io.mersel.dss</groupId>
     <artifactId>mersel-dss-verify-api</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
     <name>mersel-dss-verify-api</name>
     <description>Mersel DSS Verify API - Türkiye e-imza standartlarına uygun dijital imza doğrulama servisi</description>
 
@@ -31,13 +31,44 @@
             <artifactId>dss-xades</artifactId>
             <version>6.3</version>
         </dependency>
-        
+
+        <dependency>
+            <groupId>eu.europa.ec.joinup.sd-dss</groupId>
+            <artifactId>dss-cades</artifactId>
+            <version>6.3</version>
+        </dependency>
+
+        <!--
+             DSS 6.3 split: dss-cms (SPI / facade) + ya dss-cms-object ya da
+             dss-cms-stream concrete implementation. CAdES doğrulama bunlardan
+             birini sınıf yolunda görmezse runtime'da:
+                 "No implementation found for ICMSUtils in classpath,
+                  please choose between dss-cms-object or dss-cms-stream"
+             şeklinde patlar. dss-cms-object daha tipik tüm-bellekte API'dir.
+        -->
+        <dependency>
+            <groupId>eu.europa.ec.joinup.sd-dss</groupId>
+            <artifactId>dss-cms-object</artifactId>
+            <version>6.3</version>
+        </dependency>
+
         <dependency>
             <groupId>eu.europa.ec.joinup.sd-dss</groupId>
             <artifactId>dss-pades</artifactId>
             <version>6.3</version>
         </dependency>
-        
+
+        <!--
+             DSS 6.3 PAdES split: dss-pades (SPI) + concrete backend.
+             dss-pades-pdfbox üretimde de tercih ediliyor; openpdf alternatif.
+             Eksik olursa: "No implementation found for IPdfObjFactory ..."
+        -->
+        <dependency>
+            <groupId>eu.europa.ec.joinup.sd-dss</groupId>
+            <artifactId>dss-pades-pdfbox</artifactId>
+            <version>6.3</version>
+        </dependency>
+
         <dependency>
             <groupId>eu.europa.ec.joinup.sd-dss</groupId>
             <artifactId>dss-validation</artifactId>
@@ -132,11 +163,17 @@
             <version>2.15.3</version>
         </dependency>
 
-        <!-- PDF Libraries -->
+        <!--
+             PDF Libraries — DSS 6.3'ün dss-pades-pdfbox modülü pdfbox 3.x
+             üzerine derlendi (yeni `streamCache` API'sini kullanıyor).
+             Eski pdfbox 2.x ile çalıştırırsanız runtime'da:
+                 java.lang.NoSuchFieldError: streamCache
+             şeklinde patlar. DSS 6.3 ile resmi olarak test edilmiş 3.x serisi.
+        -->
         <dependency>
             <groupId>org.apache.pdfbox</groupId>
             <artifactId>pdfbox</artifactId>
-            <version>2.0.24</version>
+            <version>3.0.5</version>
         </dependency>
 
         <!-- BouncyCastle -->
