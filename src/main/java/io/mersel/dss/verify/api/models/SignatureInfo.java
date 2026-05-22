@@ -30,6 +30,20 @@ public class SignatureInfo {
     private String policyIdentifier; // Policy ID (XAdES-EPES için)
     private ValidationDetails validationDetails; // Detaylı validation bilgileri
 
+    /**
+     * Mersel DSS Verifier'ın bu imza için DSS kararını <em>override
+     * ettiği</em> tüm durumlar. Boş veya null ise: DSS'in kararı aynen
+     * kullanıldı, hiçbir Mersel-spesifik tolerans uygulanmadı.
+     *
+     * <p>Audit/compliance için kritik alan — operatör veya denetleyici "bu
+     * imza neden VALID gösterildi?" diye sorduğunda her override'ın gerekçesi
+     * + DSS'in orijinal kararı + somut delil burada raporlanır.</p>
+     *
+     * @see AppliedSuppression
+     * @see io.mersel.dss.verify.api.models.enums.SuppressionCode
+     */
+    private List<AppliedSuppression> appliedSuppressions;
+
     // Getters and Setters
     public String getSignatureId() {
         return signatureId;
@@ -181,6 +195,14 @@ public class SignatureInfo {
 
     public void setValidationDetails(ValidationDetails validationDetails) {
         this.validationDetails = validationDetails;
+    }
+
+    public List<AppliedSuppression> getAppliedSuppressions() {
+        return appliedSuppressions;
+    }
+
+    public void setAppliedSuppressions(List<AppliedSuppression> appliedSuppressions) {
+        this.appliedSuppressions = appliedSuppressions;
     }
 }
 

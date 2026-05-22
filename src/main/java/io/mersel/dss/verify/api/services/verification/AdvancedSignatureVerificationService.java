@@ -27,6 +27,7 @@ import io.mersel.dss.verify.api.config.VerificationConfiguration;
 import io.mersel.dss.verify.api.exceptions.VerificationException;
 import io.mersel.dss.verify.api.models.*;
 import io.mersel.dss.verify.api.models.enums.SignatureType;
+import io.mersel.dss.verify.api.models.enums.SuppressionCode;
 import io.mersel.dss.verify.api.models.enums.VerificationLevel;
 import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService;
 import io.mersel.dss.verify.api.services.util.EcdsaXmlSignaturePreprocessor;
@@ -452,15 +453,20 @@ public class AdvancedSignatureVerificationService {
 
         // TR-özel tolerans değerlendirmesi: KamuSM/GİB üreticisi XAdES Type URI
         // yazım hatasını tespit edip override edebilir miyiz? Karar tek noktada
-        // alınır, tüm aşağıdaki "isValid" akışı buradan beslenir.
+        // alınır; suppression objesi başarıysa null değildir ve audit kanalına
+        // (sigInfo.appliedSuppressions) eklenir.
         SignatureWrapper signatureWrapper = diagnosticData.getSignatureById(signatureId);
-        boolean trToleranceApplied = applyTrLegacyXadesToleranceIfApplicable(
+        AppliedSuppression trSuppression = evaluateTrLegacyXadesTolerance(
                 signatureId, indication, subIndication, signatureWrapper,
                 detailedReport, originalXmlBytes);
+        boolean trToleranceApplied = trSuppression != null;
 
         if (trToleranceApplied) {
             // İmzayı PASSED'a yükselttik. SubIndication artık anlamsız —
-            // istemciyi yanıltmamak için temizliyoruz.
+            // istemciyi yanıltmamak için temizliyoruz. Audit kanıtı
+            // appliedSuppressions altına yazılıyor.
+            sigInfo.setAppliedSuppressions(
+                    new ArrayList<>(java.util.Collections.singletonList(trSuppression)));
             indication = Indication.TOTAL_PASSED;
             subIndication = null;
         }
@@ -540,7 +546,8 @@ public class AdvancedSignatureVerificationService {
 
     /**
      * KamuSM / GİB üreticisinin XAdES <code>Reference Type</code> URI yazım
-     * hatasını tespit edip imzayı geçerli sayılabilir mi kararını verir.
+     * hatasını tespit edip imzanın geçerli sayılıp sayılamayacağını
+     * değerlendirir.
      *
      * <p><b>Tolerans tüm şu koşullar sağlandığında devreye girer:</b></p>
      * <ol>
@@ -558,14 +565,11 @@ public class AdvancedSignatureVerificationService {
      *       eşleşen Type URI buluyor.</li>
      * </ol>
      *
-     * <p><b>Bu fonksiyon SADECE tespit ve karar verir.</b> Tolerans
-     * uygulandığında <code>true</code> döner; çağıran taraf indication'ı
-     * TOTAL_PASSED'e set eder.</p>
-     *
-     * @return tolerans uygulandıysa <code>true</code>; aksi halde
-     *         <code>false</code> (DSS kararı aynen kullanılmalı)
+     * @return tolerans uygulanacaksa audit kanalına yazılacak
+     *         {@link AppliedSuppression} objesi; aksi halde <code>null</code>
+     *         (DSS kararı aynen kullanılmalı).
      */
-    private boolean applyTrLegacyXadesToleranceIfApplicable(
+    private AppliedSuppression evaluateTrLegacyXadesTolerance(
             String signatureId,
             Indication indication,
             SubIndication subIndication,
@@ -574,35 +578,50 @@ public class AdvancedSignatureVerificationService {
             byte[] originalXmlBytes) {
 
         if (!config.isTrLegacyXadesToleranceEnabled()) {
-            return false;
+            return null;
         }
         if (indication != Indication.INDETERMINATE) {
-            return false;
+            return null;
         }
         if (subIndication != SubIndication.SIG_CONSTRAINTS_FAILURE) {
-            return false;
+            return null;
         }
         if (signatureWrapper == null) {
-            return false;
+            return null;
         }
         if (!signatureWrapper.isSignatureIntact() || !signatureWrapper.isSignatureValid()) {
-            return false;
+            return null;
         }
         if (!isOnlyBbbSavFailureMessageDigestOrSignedProperties(detailedReport, signatureId)) {
-            return false;
+            return null;
         }
         if (originalXmlBytes == null || legacyTrXadesDetector == null) {
-            return false;
+            return null;
         }
         String hit = legacyTrXadesDetector.detect(originalXmlBytes);
         if (hit == null) {
-            return false;
+            return null;
         }
-        logger.info("TR legacy XAdES toleransı uygulandı (signatureId={}). DSS "
+        logger.info("TR legacy XAdES toleransı uygulandı (signatureId={}, code={}). DSS "
                         + "INDETERMINATE/SIG_CONSTRAINTS_FAILURE iken imza kriptografik "
                         + "olarak sağlam ve tek hata BBB_SAV_ISQPMDOSPP. Üretici Type URI: '{}'",
-                signatureId, hit);
-        return true;
+                signatureId, SuppressionCode.MDSS_XADES_LEGACY_TR_TYPE_URI.getCode(), hit);
+
+        SuppressionCode sc = SuppressionCode.MDSS_XADES_LEGACY_TR_TYPE_URI;
+        java.util.Map<String, Object> evidence = new java.util.LinkedHashMap<>();
+        evidence.put("detectedTypeUri", hit);
+        evidence.put("expectedTypeUri", "http://uri.etsi.org/01903#SignedProperties");
+        evidence.put("dssBbbConstraint", BBB_SAV_ISQPMDOSPP_KEY);
+
+        return new AppliedSuppression(
+                sc.getCode(),
+                sc.getTitle(),
+                sc.getDefaultReason() + " Üretici Type URI: \"" + hit + "\".",
+                sc.getSeverity(),
+                indication.name(),
+                subIndication.name(),
+                evidence,
+                sc.getDocsUrl());
     }
 
     /**
@@ -875,8 +894,11 @@ public class AdvancedSignatureVerificationService {
                 // TR-özel tolerans devrede: DSS'in SIG_CONSTRAINTS_FAILURE'ı
                 // jenerik bir kriptografik hata değil, sadece XAdES Type URI
                 // yazım hatası kaynaklı. Operatör/istemci için anlaşılır
-                // bir uyarıya çevir.
-                warnings.add("İmza, KamuSM/GİB ekosistemine özgü XAdES "
+                // bir uyarıya çevir; tam audit detayı sigInfo.appliedSuppressions
+                // altında. Kodu warning metnine de ekliyoruz ki operatör
+                // log/grep ile hızlıca tarayabilsin.
+                warnings.add("[" + SuppressionCode.MDSS_XADES_LEGACY_TR_TYPE_URI.getCode()
+                        + "] İmza, KamuSM/GİB ekosistemine özgü XAdES "
                         + "SignedProperties Type URI yazım hatası içeriyor "
                         + "(\"…/v1.3.2/XAdES.xsd#SignedProperties\"). "
                         + "Kriptografik bütünlük doğrulandı; tolerans uygulandı.");

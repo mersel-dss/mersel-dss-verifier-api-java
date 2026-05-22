@@ -389,10 +389,71 @@ gibi diğer SAV constraint'leri FAIL ediyorsa imza yine reddedilir.
 Tolerans uygulandığında log'a tek satır kaydedilir:
 
 ```
-TR legacy XAdES toleransı uygulandı (signatureId=…). DSS INDETERMINATE/
-SIG_CONSTRAINTS_FAILURE iken imza kriptografik olarak sağlam ve tek hata
-BBB_SAV_ISQPMDOSPP. Üretici Type URI: '…'
+TR legacy XAdES toleransı uygulandı (signatureId=…, code=MDSS-XADES-LEGACY-TR-TYPE-URI).
+DSS INDETERMINATE/SIG_CONSTRAINTS_FAILURE iken imza kriptografik olarak sağlam
+ve tek hata BBB_SAV_ISQPMDOSPP. Üretici Type URI: '…'
 ```
+
+#### Applied Suppressions — Audit Trail
+
+Mersel DSS Verifier'ın DSS kararını **override ettiği** her durum response içinde
+yapılandırılmış olarak raporlanır. Bu, *"DSS aslında ne demişti, biz ne yaptık,
+neden?"* sorusuna machine-readable cevap verir — audit, compliance ve operasyonel
+görünürlük için kritik.
+
+```jsonc
+{
+  "signatures": [
+    {
+      "valid": true,
+      "indication": "TOTAL_PASSED",
+      "appliedSuppressions": [
+        {
+          "code": "MDSS-XADES-LEGACY-TR-TYPE-URI",
+          "title": "TR-legacy XAdES SignedProperties Type URI toleransı",
+          "reason": "İmza, KamuSM/GİB ekosistemine özgü XAdES SignedProperties Type URI yazım hatası içeriyor. Kriptografik bütünlük doğrulandı; tolerans uygulandı. Üretici Type URI: \"http://uri.etsi.org/01903/v1.3.2/XAdES.xsd#SignedProperties\".",
+          "severity": "INFO",
+          "originalIndication": "INDETERMINATE",
+          "originalSubIndication": "SIG_CONSTRAINTS_FAILURE",
+          "evidence": {
+            "detectedTypeUri": "http://uri.etsi.org/01903/v1.3.2/XAdES.xsd#SignedProperties",
+            "expectedTypeUri": "http://uri.etsi.org/01903#SignedProperties",
+            "dssBbbConstraint": "BBB_SAV_ISQPMDOSPP"
+          },
+          "docsUrl": "https://github.com/mersel-dss/mersel-dss-verifier-api-java/blob/main/docs/suppressions/MDSS-XADES-LEGACY-TR-TYPE-URI.md"
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Code naming convention**: `MDSS-{LAYER}-{DESCRIPTIVE-SLUG}`
+
+- `MDSS` — Mersel DSS prefix'i.
+- `{LAYER}` — `XADES` / `CADES` / `PADES` / `CHAIN` / `CRYPTO` / `TIMESTAMP` / `REVOCATION`.
+- `{DESCRIPTIVE-SLUG}` — UPPER-KEBAB-CASE özellik adı.
+
+**Kararlılık (stability)**: bir kez yayınlanan kod değiştirilmez. Davranış
+değişiyorsa yeni kod eklenir, eskisi `@Deprecated` olur.
+
+**Detaylı dokümantasyon**: Her bir kodun ne yaptığını, hangi koşullarda
+tetiklendiğini, severity gerekçesini ve nasıl kapatılabileceğini
+[`docs/suppressions/`](docs/suppressions/) klasörü altındaki MD dosyaları
+anlatır. Kayıtlı kodların tam listesi:
+[`SuppressionCode`](src/main/java/io/mersel/dss/verify/api/models/enums/SuppressionCode.java)
+enum'u.
+
+**Severity seviyeleri**:
+- `INFO` — tasarımdan sapma ama güvenlik etkisi yok (örn. üretici Type URI yazım hatası, kriptografi sağlam).
+- `WARN` — operatörün dikkat etmesi önerilir.
+- `CRITICAL` — operatör eylem almalı.
+
+**Operasyonel kullanım**: `appliedSuppressions[].code` doğrudan Prometheus metric
+label, log filter veya support ticket referansı olarak kullanılabilir
+(`mersel_dss_suppression_applied_total{code="MDSS-XADES-LEGACY-TR-TYPE-URI"}`).
+`appliedSuppressions` boş veya `null` ise: DSS'in kararı aynen kullanıldı, hiçbir
+Mersel-spesifik tolerans uygulanmadı.
 
 ### Güvenilir Kök Sertifika Resolver Kullanımı
 

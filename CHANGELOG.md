@@ -7,6 +7,44 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+### Added
+- **Applied Suppressions / audit trail**: Mersel DSS Verifier'in DSS karari
+  uzerine *override* uyguladigi her durum artik response icinde yapilandirilmis
+  olarak raporlaniyor. Yeni `signatures[i].appliedSuppressions` alani:
+  - `code` — kararli, public API kontrati olan tanimlayici (ornek:
+    `MDSS-XADES-LEGACY-TR-TYPE-URI`).
+  - `title`, `reason`, `severity` (`INFO` / `WARN` / `CRITICAL`).
+  - `originalIndication`, `originalSubIndication` — DSS'in *gercek* karari
+    (override oncesi). "DSS aslinda ne demisti, biz ne yaptik" sorusuna kesin
+    cevap; audit/compliance icin kritik.
+  - `evidence` — override'i tetikleyen somut delil (free-form key/value;
+    her kod icin sema farklilasir).
+  - `docsUrl` — GitHub repo altinda `docs/suppressions/<CODE>.md` dosyasina
+    isaret eder; operatore tek tikla detayli sebep + tolerans kurali +
+    severity gerekcesi + kapatma yonergesi.
+  - Yeni model siniflari: `AppliedSuppression`, `SuppressionCode` (enum;
+    naming: `MDSS-{LAYER}-{DESCRIPTIVE-SLUG}`).
+  - Ilk kayitli kod: `MDSS-XADES-LEGACY-TR-TYPE-URI` — TR-legacy XAdES
+    SignedProperties Type URI toleransinda otomatik atanir.
+  - 6 unit test (`AppliedSuppressionTest`): naming convention guard,
+    kararli code string'leri, JSON serializasyon, `@JsonInclude(NON_NULL)`
+    davranisi, immutable `evidence` map'i.
+- **Suppression dokumantasyon klasoru**: [`docs/suppressions/`](docs/suppressions/)
+  altinda her kayitli kod icin detayli MD sayfasi.
+  - [`docs/suppressions/README.md`](docs/suppressions/README.md) — index +
+    naming convention + kararlilik + severity rehberi + contributors guide.
+  - [`docs/suppressions/MDSS-XADES-LEGACY-TR-TYPE-URI.md`](docs/suppressions/MDSS-XADES-LEGACY-TR-TYPE-URI.md)
+    — TR-legacy XAdES Type URI toleransinin tam dokumani: sorun aciklamasi,
+    6 tetik kosulu, sonuc tablosu, ornek audit kaydi, risk degerlendirmesi.
+
+### Changed
+- `validationWarnings` icindeki TR-toleransi mesajinin onune kod prefix'i
+  eklendi (ornek: `[MDSS-XADES-LEGACY-TR-TYPE-URI] ...`); operatorler log
+  uzerinde grep edebilir.
+- `AdvancedSignatureVerificationService.applyTrLegacyXadesToleranceIfApplicable`
+  artik `evaluateTrLegacyXadesTolerance` adina sahip; boolean yerine
+  `AppliedSuppression` dondurur ki audit kaydi tek noktadan uretilsin.
+
 ## [0.3.0] - 2026-05-22
 
 ### Added
