@@ -7,6 +7,8 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-22
+
 ### Added
 - GIB / TUBITAK Mali Muhur v3 imzali XAdES dokumanlarinin DSS uzerinde
   dogrulanabilmesi icin `EcdsaXmlSignaturePreprocessor` eklendi. ASN.1
