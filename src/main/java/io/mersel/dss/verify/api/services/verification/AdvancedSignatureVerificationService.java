@@ -25,6 +25,7 @@ import io.mersel.dss.verify.api.models.*;
 import io.mersel.dss.verify.api.models.enums.SignatureType;
 import io.mersel.dss.verify.api.models.enums.VerificationLevel;
 import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService;
+import io.mersel.dss.verify.api.services.util.EcdsaXmlSignaturePreprocessor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -59,6 +60,9 @@ public class AdvancedSignatureVerificationService {
 
     @Autowired
     private ResourceLoader resourceLoader;
+
+    @Autowired
+    private EcdsaXmlSignaturePreprocessor ecdsaXmlSignaturePreprocessor;
 
     // Built-in policy profilleri. signer-strict default — imzacı için
     // OCSP/CRL FAIL, ara CA için WARN. strict — eIDAS-QES paralelinde
@@ -165,6 +169,14 @@ public class AdvancedSignatureVerificationService {
         try {
             // Dokümanı oku
             byte[] signedBytes = signedDocument.getBytes();
+
+            // GİB/TÜBİTAK Mali Mühür ECDSA imzaları (DER-encoded) için W3C XMLDSig
+            // uyumluluğunu sağla: SignatureValue içindeki ASN.1 DER SEQUENCE'i raw r||s'e çevir.
+            // Preprocessor sertifika EC değilse veya gerekli koşullar sağlanmazsa no-op döner.
+            if (config.isEcdsaDerPreprocessorEnabled()) {
+                signedBytes = ecdsaXmlSignaturePreprocessor.preprocess(signedBytes);
+            }
+
             DSSDocument document = new InMemoryDocument(signedBytes, signedDocument.getOriginalFilename());
 
             // Orijinal doküman varsa (detached signature için)

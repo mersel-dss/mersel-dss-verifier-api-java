@@ -1,13 +1,43 @@
 # Changelog
 
-Tüm önemli değişiklikler bu dosyada dokümante edilmektedir.
+Tum onemli degisiklikler bu dosyada dokumante edilmektedir.
 
-Format [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) standardına dayanmaktadır,
-ve bu proje [Semantic Versioning](https://semver.org/spec/v2.0.0.html) kullanmaktadır.
+Format [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) standardina dayanir,
+ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kullanir.
 
 ## [Unreleased]
 
-_(yeni değişiklikler buraya eklenir; ilk release sonrası ayrı bir blok açılır.)_
+### Added
+- GIB / TUBITAK Mali Muhur v3 imzali XAdES dokumanlarinin DSS uzerinde
+  dogrulanabilmesi icin `EcdsaXmlSignaturePreprocessor` eklendi. ASN.1
+  DER-encoded ECDSA `SignatureValue`'larini W3C XMLDSig raw `r||s` formatina
+  donusturur; SignedInfo digest'leri korunur.
+- 11 CI-safe unit test (`EcdsaXmlSignaturePreprocessorTest`): BouncyCastle ile
+  runtime synthetic fixture uretir, hicbir external dosyaya bagimli degildir.
+- Emergency kill-switch: `verification.ecdsa-der-preprocessor-enabled` (default `true`).
+- Release surec altyapisi:
+  - `scripts/release.sh` (lokal release hazirlama)
+  - `scripts/bump-version.sh` (SemVer bump)
+  - `scripts/extract-release-notes.sh` (CHANGELOG bolum cikartici)
+  - `scripts/build-release-notes.sh` (release notes + provenance)
+  - `scripts/check-changelog-updated.sh` (PR guard)
+  - `.github/workflows/release.yml` (immutable GitHub Release pipeline)
+  - `.github/workflows/changelog-check.yml` (PR-time CHANGELOG kontrolu)
+  - `docs/RELEASE_PROCESS.md` (release dokumantasyonu)
+- `pom.xml`'e build provenance plugin'leri:
+  - `maven-jar-plugin` manifestEntries (Implementation-*, Build-*, X-Mersel-*)
+  - `spring-boot-maven-plugin` build-info goal (-> /actuator/info)
+  - `maven-source-plugin` (sources.jar)
+  - `cyclonedx-maven-plugin` 2.8.0 (CycloneDX 1.5 SBOM)
+  - `project.build.outputTimestamp` (reproducible builds Maven 3.6.1+)
+
+### Changed
+- `AdvancedSignatureVerificationService` ve `SignatureVerificationService`:
+  XML byte'larini DSS'e gecmeden once `EcdsaXmlSignaturePreprocessor`'dan
+  gecirir; preprocessor sertifika EC degilse veya gerekli kosullar saglanmazsa
+  no-op doner.
+
+---
 
 ## [0.2.0] - 2026-05-17
 
@@ -88,22 +118,11 @@ _(yeni değişiklikler buraya eklenir; ilk release sonrası ayrı bir blok açı
 
 ---
 
+## [0.1.0] - 2026-03-11
+
+### Added
+- Ilk release.
+
 ---
 
-## Versiyon Numaralandırma
-
-Bu proje [Semantic Versioning](https://semver.org/) kullanır:
-
-- **MAJOR** versiyon: Geriye uyumsuz API değişiklikleri
-- **MINOR** versiyon: Geriye uyumlu yeni özellikler
-- **PATCH** versiyon: Geriye uyumlu bug düzeltmeleri
-
-## Kategori Açıklamaları
-
-- **Added**: Yeni özellikler
-- **Changed**: Mevcut özelliklerde değişiklikler
-- **Deprecated**: Yakında kaldırılacak özellikler
-- **Removed**: Kaldırılan özellikler
-- **Fixed**: Bug düzeltmeleri
-- **Security**: Güvenlik düzeltmeleri
-
+> **Versioning & Kategori rehberi:** [docs/RELEASE_PROCESS.md](docs/RELEASE_PROCESS.md).

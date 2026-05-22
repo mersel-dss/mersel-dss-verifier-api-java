@@ -21,6 +21,34 @@
         <maven.compiler.source>1.8</maven.compiler.source>
         <maven.compiler.target>1.8</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!--
+            ===================================================================
+            Build Provenance Properties (release immutability + audit trail)
+            ===================================================================
+            Bu degerler hem JAR MANIFEST.MF'ine hem Spring Boot
+            META-INF/build-info.properties (-> /actuator/info) dosyalarina
+            gomulur. Lokal build'te literal "local"/"local-build" default'u
+            devrede; CI/CD release akisinda -D ile override edilir.
+
+            Override edilen property'ler:
+              mersel.build.revision   = git commit SHA (orn. GITHUB_SHA)
+              mersel.build.number     = CI run number (orn. GITHUB_RUN_NUMBER)
+              mersel.build.timestamp  = ISO-8601 UTC timestamp
+              mersel.build.host       = runner OS+arch
+              project.build.outputTimestamp = ayni timestamp (jar mtime sabitler)
+
+            ONEMLI: Property adlarini 'mersel.build.*' prefix'i ile tuttuk.
+            Sade 'build.timestamp' adli bir property maven-archiver'in manifest
+            interpolation katmaninda OZELDIR (her zaman ${maven.build.timestamp}
+            built-in'ine fallback eder) - kendi namespace'imiz override edilebilir.
+        -->
+        <maven.build.timestamp.format>yyyy-MM-dd'T'HH:mm:ss'Z'</maven.build.timestamp.format>
+        <mersel.build.revision>local</mersel.build.revision>
+        <mersel.build.number>0</mersel.build.number>
+        <mersel.build.timestamp>local-build</mersel.build.timestamp>
+        <mersel.build.host>local</mersel.build.host>
+        <project.build.outputTimestamp>2026-01-01T00:00:00Z</project.build.outputTimestamp>
     </properties>
 
     <dependencies>
@@ -301,6 +329,19 @@
 
     <build>
         <plugins>
+            <!--
+                spring-boot-maven-plugin: repackage + build-info goal.
+                ===========================================================
+                Iki execution:
+                1) Default (id'siz) execution: repackage'a mainClass'i set eder.
+                   Spring Boot starter-parent pluginManagement'taki default
+                   'repackage' execution'unu OVERRIDE eder (ayni id ile yeni
+                   execution yarattigimiz icin Maven merge yapar).
+                2) build-info execution: META-INF/build-info.properties uretir.
+                   Runtime erisim:
+                     - /actuator/info endpoint'i
+                     - Spring DI: @Autowired BuildProperties
+            -->
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
@@ -310,7 +351,113 @@
                             <mainClass>io.mersel.dss.verify.api.VerifyApplication</mainClass>
                         </configuration>
                     </execution>
+                    <execution>
+                        <id>build-info</id>
+                        <goals>
+                            <goal>build-info</goal>
+                        </goals>
+                        <configuration>
+                            <additionalProperties>
+                                <revision>${mersel.build.revision}</revision>
+                                <buildNumber>${mersel.build.number}</buildNumber>
+                                <buildTime>${mersel.build.timestamp}</buildTime>
+                                <buildHost>${mersel.build.host}</buildHost>
+                                <buildJdk>${java.version}</buildJdk>
+                                <buildOs>${os.name} ${os.arch}</buildOs>
+                            </additionalProperties>
+                        </configuration>
+                    </execution>
                 </executions>
+            </plugin>
+
+            <!--
+                maven-jar-plugin - Standart MANIFEST.MF entry'leri.
+                ==========================================================
+                Spring Boot'un repackage goal'u alttaki "thin" JAR'in
+                manifestini fat JAR'a propagate eder; dolayisiyla buraya
+                koydugumuz entry'ler son `mersel-dss-verify-api-X.Y.Z.jar`
+                icinde de gorunur.
+
+                combine.self="override" - Spring Boot starter-parent
+                pluginManagement blogu maven-jar-plugin'e kendi
+                manifestEntries entry'sini ekler; tamamen degistirmek icin
+                override gerekir.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifestEntries combine.self="override">
+                            <Implementation-Title>${project.name}</Implementation-Title>
+                            <Implementation-Version>${project.version}</Implementation-Version>
+                            <Implementation-Vendor>Mersel DSS</Implementation-Vendor>
+                            <Specification-Title>Mersel DSS Verify API</Specification-Title>
+                            <Specification-Version>${project.version}</Specification-Version>
+                            <Specification-Vendor>Mersel DSS</Specification-Vendor>
+                            <Build-Time>${mersel.build.timestamp}</Build-Time>
+                            <Build-Revision>${mersel.build.revision}</Build-Revision>
+                            <Build-Number>${mersel.build.number}</Build-Number>
+                            <Build-Host>${mersel.build.host}</Build-Host>
+                            <Build-Jdk>${java.version}</Build-Jdk>
+                            <Built-By>mersel-dss-ci</Built-By>
+                            <X-Mersel-Component>verify-api</X-Mersel-Component>
+                            <X-Mersel-Project>${project.groupId}:${project.artifactId}</X-Mersel-Project>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
+
+            <!--
+                maven-source-plugin - Sources JAR uretimi (release asset'i).
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>jar-no-fork</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+                cyclonedx-maven-plugin - CycloneDX 1.5 SBOM.
+                ==========================================================
+                Cikti: target/bom.json + target/bom.xml
+                Her dependency'nin group/name/version/license/PURL bilgisi.
+                OWASP Dependency-Track veya `cyclonedx-cli` ile CVE tarama.
+            -->
+            <plugin>
+                <groupId>org.cyclonedx</groupId>
+                <artifactId>cyclonedx-maven-plugin</artifactId>
+                <version>2.8.0</version>
+                <executions>
+                    <execution>
+                        <id>make-sbom</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>makeAggregateBom</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <projectType>application</projectType>
+                    <schemaVersion>1.5</schemaVersion>
+                    <includeBomSerialNumber>true</includeBomSerialNumber>
+                    <includeCompileScope>true</includeCompileScope>
+                    <includeProvidedScope>false</includeProvidedScope>
+                    <includeRuntimeScope>true</includeRuntimeScope>
+                    <includeSystemScope>false</includeSystemScope>
+                    <includeTestScope>false</includeTestScope>
+                    <includeLicenseText>false</includeLicenseText>
+                    <outputFormat>all</outputFormat>
+                    <outputName>bom</outputName>
+                </configuration>
             </plugin>
         </plugins>
     </build>

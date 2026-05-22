@@ -43,6 +43,15 @@ public class VerificationConfiguration {
     @Value("${verification.strict-mode:true}")
     private boolean strictMode;
 
+    /**
+     * GİB / TÜBİTAK Mali Mühür DER-encoded ECDSA SignatureValue'sini
+     * W3C XMLDSig raw r||s formatına dönüştüren preprocessor'ın aktif/pasif kontrolü.
+     * Emergency kill-switch: <code>false</code> yapılırsa hiç bir XML dokümanına
+     * dokunulmaz (DSS sıkı W3C davranışına geri döner).
+     */
+    @Value("${verification.ecdsa-der-preprocessor-enabled:true}")
+    private boolean ecdsaDerPreprocessorEnabled;
+
     public String getCertStorePath() {
         return certStorePath;
     }
@@ -77,6 +86,14 @@ public class VerificationConfiguration {
 
     public void setStrictMode(boolean strictMode) {
         this.strictMode = strictMode;
+    }
+
+    public boolean isEcdsaDerPreprocessorEnabled() {
+        return ecdsaDerPreprocessorEnabled;
+    }
+
+    public void setEcdsaDerPreprocessorEnabled(boolean ecdsaDerPreprocessorEnabled) {
+        this.ecdsaDerPreprocessorEnabled = ecdsaDerPreprocessorEnabled;
     }
 }
 

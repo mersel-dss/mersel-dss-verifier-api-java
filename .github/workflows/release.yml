@@ -1,0 +1,413 @@
+name: Release
+
+# =============================================================================
+# Mersel DSS Verify API - Otomatik JAR derleme + immutable GitHub Release
+# =============================================================================
+#
+# Tetiklenme:
+#   - 'v*' formatinda bir tag push edildiginde (orn. v0.2.0, v1.0.0-rc.1)
+#   - Manuel: workflow_dispatch (smoke test icin; gercek release degil - JAR
+#     uretir ama GitHub Release olusturmaz)
+#
+# Immutability garantileri:
+#   1. Tag -> pom.xml version eslesmesi zorunlu (uyusmazlik fail)
+#   2. -SNAPSHOT surum reddedilir
+#   3. CHANGELOG.md'de '## [VERSION]' basligi yoksa fail
+#   4. Ayni tag icin GitHub Release zaten varsa skip (re-run idempotent)
+#   5. Uretilen JAR'a build-revision (git SHA) + build-time (UTC) gomulur
+#      -> Maven manifest ve Spring Boot build-info.properties
+#   6. SHA-256 checksum dosyalari artifact ile birlikte yayinlanir
+#   7. CycloneDX SBOM (bom.json + bom.xml) artifact'lere eklenir
+#   8. Reproducible build: project.build.outputTimestamp sabitlenmis;
+#      ayni commit'ten build edilen JAR ayni bytes'lari uretir
+#
+# Ciktilar (GitHub Release asset'i olarak):
+#   - mersel-dss-verify-api-<VERSION>.jar         (executable Spring Boot fat JAR)
+#   - mersel-dss-verify-api-<VERSION>.jar.sha256
+#   - mersel-dss-verify-api-<VERSION>-sources.jar
+#   - mersel-dss-verify-api-<VERSION>-sbom.json   (CycloneDX SBOM)
+#   - mersel-dss-verify-api-<VERSION>-sbom.xml
+#   - RELEASE_NOTES.md  (CHANGELOG'tan cikartilan ilgili bolum)
+#
+# Coordination:
+#   Ayni 'v*' tag'inde Docker workflow'u paralel tetiklenir:
+#     - release.yml         : GitHub Release + JAR + SBOM + checksum
+#     - docker-publish.yml  : ghcr.io/.../mersel-dss-verifier-api-java:VERSION imaji
+# =============================================================================
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'         # v0.2.0
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'       # v1.0.0-rc.1, v0.2.0-beta.2
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Sadece build artifact uret, GitHub Release acma'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # GitHub Release olusturmak icin zorunlu
+
+env:
+  JAVA_VERSION: '8'
+  JAVA_DISTRIBUTION: 'temurin'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: validate - Tag/pom/CHANGELOG tutarliligini dogrula
+  # ---------------------------------------------------------------------------
+  validate:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version:        ${{ steps.parse.outputs.version }}
+      tag:            ${{ steps.parse.outputs.tag }}
+      is_prerelease:  ${{ steps.parse.outputs.is_prerelease }}
+      release_exists: ${{ steps.gh_release.outputs.release_exists }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tag history icin tam clone gerekli
+
+      - name: Parse tag and pom version
+        id: parse
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            POM_VERSION=$(perl -0777 -ne 's|<parent>.*?</parent>||s; if (/<version>([^<]+)<\/version>/) { print $1; exit }' pom.xml)
+            TAG="v${POM_VERSION}-dispatch.${{ github.run_number }}"
+            VERSION="${POM_VERSION}"
+            echo "tag=${TAG}"            >> "$GITHUB_OUTPUT"
+            echo "version=${VERSION}"    >> "$GITHUB_OUTPUT"
+            echo "is_prerelease=true"    >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch -> tag synthetic: ${TAG}"
+            exit 0
+          fi
+
+          TAG="${GITHUB_REF##refs/tags/}"
+          VERSION="${TAG#v}"
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.\-]+)?$ ]]; then
+            echo "::error::Tag '$TAG' SemVer 2.0.0 formatina uymuyor."
+            exit 1
+          fi
+
+          if [[ "$VERSION" == *SNAPSHOT* ]]; then
+            echo "::error::Release surumu -SNAPSHOT iceremez: $VERSION"
+            exit 1
+          fi
+
+          if [[ "$VERSION" == *-* ]]; then
+            IS_PRE="true"
+          else
+            IS_PRE="false"
+          fi
+
+          POM_VERSION=$(perl -0777 -ne 's|<parent>.*?</parent>||s; if (/<version>([^<]+)<\/version>/) { print $1; exit }' pom.xml)
+          if [[ "$POM_VERSION" != "$VERSION" ]]; then
+            echo "::error::Tag surumu ($VERSION) pom.xml surumu ($POM_VERSION) ile uyusmuyor."
+            echo "::error::Release oncesi pom.xml'i bump edip ayni commit'i tag'leyin."
+            exit 1
+          fi
+
+          echo "tag=${TAG}"              >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}"      >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=${IS_PRE}" >> "$GITHUB_OUTPUT"
+          echo "Tag ${TAG} pom.xml ile uyusuyor (pre-release=${IS_PRE})."
+
+      - name: Validate CHANGELOG has section for this version
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.parse.outputs.version }}"
+          if ! grep -qE "^## \[${VERSION}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md'de '## [${VERSION}]' basligi bulunamadi."
+            echo "::error::Release oncesi CHANGELOG.md'deki [Unreleased] bolumunu '[${VERSION}] - YYYY-MM-DD' olarak finalize edin."
+            exit 1
+          fi
+          echo "CHANGELOG.md'de '## [${VERSION}]' basligi bulundu."
+
+      - name: Check if GitHub Release already exists (immutability)
+        id: gh_release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.parse.outputs.tag }}"
+          if gh release view "$TAG" --json id --jq .id >/dev/null 2>&1; then
+            echo "::warning::GitHub Release '$TAG' zaten mevcut - idempotent skip."
+            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+            echo "Release '$TAG' henuz olusturulmamis - devam ediliyor."
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Job 2: build - JAR + SBOM + checksum uret
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build release artifacts
+    needs: validate
+    if: needs.validate.outputs.release_exists != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.locate.outputs.artifact_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          cache: maven
+
+      - name: Run unit tests
+        run: mvn -B test
+
+      - name: Determine reproducible build timestamp
+        id: ts
+        run: |
+          BUILD_TS=$(git log -1 --format=%cI HEAD)
+          echo "BUILD_TS=${BUILD_TS}" >> "$GITHUB_OUTPUT"
+          echo "Reproducible build timestamp: ${BUILD_TS}"
+
+      - name: Build JAR + SBOM with embedded metadata
+        env:
+          VERSION:    ${{ needs.validate.outputs.version }}
+          TAG:        ${{ needs.validate.outputs.tag }}
+          BUILD_REV:  ${{ github.sha }}
+          BUILD_NUM:  ${{ github.run_number }}
+          BUILD_TS:   ${{ steps.ts.outputs.BUILD_TS }}
+          BUILD_HOST: ${{ runner.os }}-${{ runner.arch }}
+        run: |
+          mvn -B package -DskipTests \
+            -Dmersel.build.revision="${BUILD_REV}" \
+            -Dmersel.build.number="${BUILD_NUM}" \
+            -Dmersel.build.timestamp="${BUILD_TS}" \
+            -Dmersel.build.host="${BUILD_HOST}" \
+            -Dproject.build.outputTimestamp="${BUILD_TS}"
+
+      - name: Locate primary artifact
+        id: locate
+        run: |
+          set -euo pipefail
+          PRIMARY_JAR=$(find target -maxdepth 1 -name '*.jar' \
+            ! -name '*-sources.jar' ! -name '*-javadoc.jar' \
+            ! -name '*.original' \
+            | head -1)
+          if [[ -z "$PRIMARY_JAR" ]]; then
+            echo "::error::Primary JAR bulunamadi - target/ icerigi:"
+            ls -la target/
+            exit 1
+          fi
+          ARTIFACT_NAME=$(basename "$PRIMARY_JAR")
+          echo "artifact_name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Primary artifact: $PRIMARY_JAR"
+          ls -lah "$PRIMARY_JAR"
+
+      - name: Verify embedded build-info
+        env:
+          VERSION:   ${{ needs.validate.outputs.version }}
+          BUILD_REV: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          JAR=$(find target -maxdepth 1 -name '*.jar' \
+            ! -name '*-sources.jar' ! -name '*-javadoc.jar' \
+            ! -name '*.original' \
+            | head -1)
+
+          echo "=== MANIFEST.MF ==="
+          unzip -p "$JAR" META-INF/MANIFEST.MF | grep -E '^(Implementation|Build|Specification|Built|X-Mersel)' || true
+
+          echo ""
+          echo "=== build-info.properties ==="
+          BUILD_INFO_PATH=""
+          for candidate in 'META-INF/build-info.properties' 'BOOT-INF/classes/META-INF/build-info.properties'; do
+            if unzip -l "$JAR" | grep -qE "[[:space:]]${candidate}\$"; then
+              BUILD_INFO_PATH="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$BUILD_INFO_PATH" ]]; then
+            echo "::error::build-info.properties JAR icinde bulunamadi."
+            exit 1
+          fi
+          echo "build-info.properties path: $BUILD_INFO_PATH"
+          unzip -p "$JAR" "$BUILD_INFO_PATH"
+
+          EMBEDDED_REVISION=$(unzip -p "$JAR" "$BUILD_INFO_PATH" | grep -E '^build\.revision=' | cut -d= -f2 | tr -d '\r\n')
+          if [[ "$EMBEDDED_REVISION" != "$BUILD_REV" ]]; then
+            echo "::error::build-info.properties build.revision ($EMBEDDED_REVISION) commit SHA ile ($BUILD_REV) uyusmuyor."
+            exit 1
+          fi
+          echo "OK build.revision dogrulandi: $EMBEDDED_REVISION"
+
+          MANIFEST_VERSION=$(unzip -p "$JAR" META-INF/MANIFEST.MF | grep -E '^Implementation-Version' | head -1 | sed 's/^Implementation-Version: //' | tr -d '\r')
+          if [[ "$MANIFEST_VERSION" != "$VERSION" ]]; then
+            echo "::error::MANIFEST Implementation-Version ($MANIFEST_VERSION) tag version'la ($VERSION) uyusmuyor."
+            exit 1
+          fi
+          echo "OK Implementation-Version dogrulandi: $MANIFEST_VERSION"
+
+      - name: Build release notes (CHANGELOG section + provenance footer)
+        if: github.event_name == 'push'
+        env:
+          VERSION:       ${{ needs.validate.outputs.version }}
+          TAG:           ${{ needs.validate.outputs.tag }}
+          COMMIT_SHA:    ${{ github.sha }}
+          COMMIT_URL:    ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          BUILD_TIME:    ${{ steps.ts.outputs.BUILD_TS }}
+          BUILD_NUMBER:  ${{ github.run_number }}
+          BUILD_RUN_ID:  ${{ github.run_id }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JAVA_VERSION:  ${{ env.JAVA_VERSION }}
+          JAVA_DIST:     ${{ env.JAVA_DISTRIBUTION }}
+          RUNNER_LABEL:  ubuntu-latest
+          ARTIFACT_NAME: ${{ steps.locate.outputs.artifact_name }}
+        run: |
+          ./scripts/build-release-notes.sh "$VERSION" target/RELEASE_NOTES.md
+
+      - name: Generate SHA-256 checksums
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd target
+
+          for f in *.jar bom.json bom.xml; do
+            if [[ -f "$f" ]]; then
+              sha256sum "$f" > "$f.sha256"
+              echo "$(cat "$f.sha256")"
+            fi
+          done
+
+      - name: Stage release assets with consistent naming
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+
+          cp target/*.jar release-assets/ 2>/dev/null || true
+          rm -f release-assets/*.jar.original
+
+          cp target/*.jar.sha256 release-assets/ 2>/dev/null || true
+
+          if [[ -f target/bom.json ]]; then
+            cp target/bom.json        "release-assets/mersel-dss-verify-api-${VERSION}-sbom.json"
+            sha256sum "release-assets/mersel-dss-verify-api-${VERSION}-sbom.json" \
+              | sed "s| .*| mersel-dss-verify-api-${VERSION}-sbom.json|" \
+              > "release-assets/mersel-dss-verify-api-${VERSION}-sbom.json.sha256"
+          fi
+          if [[ -f target/bom.xml ]]; then
+            cp target/bom.xml         "release-assets/mersel-dss-verify-api-${VERSION}-sbom.xml"
+            sha256sum "release-assets/mersel-dss-verify-api-${VERSION}-sbom.xml" \
+              | sed "s| .*| mersel-dss-verify-api-${VERSION}-sbom.xml|" \
+              > "release-assets/mersel-dss-verify-api-${VERSION}-sbom.xml.sha256"
+          fi
+
+          if [[ -f target/RELEASE_NOTES.md ]]; then
+            cp target/RELEASE_NOTES.md release-assets/
+          fi
+
+          echo ""
+          echo "=== Release assets ==="
+          ls -lah release-assets/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ needs.validate.outputs.tag }}
+          path: release-assets/
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  # Job 3: publish - GitHub Release olustur (immutable)
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish GitHub Release
+    needs: [validate, build]
+    if: github.event_name == 'push' && needs.validate.outputs.release_exists != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-${{ needs.validate.outputs.tag }}
+          path: release-assets/
+
+      - name: List artifacts
+        run: ls -lah release-assets/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
+          TAG:       ${{ needs.validate.outputs.tag }}
+          VERSION:   ${{ needs.validate.outputs.version }}
+          IS_PRE:    ${{ needs.validate.outputs.is_prerelease }}
+        run: |
+          set -euo pipefail
+
+          PRERELEASE_FLAG=""
+          if [[ "$IS_PRE" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          ASSETS=()
+          while IFS= read -r f; do
+            ASSETS+=("$f")
+          done < <(find release-assets -type f ! -name 'RELEASE_NOTES.md')
+
+          gh release create "$TAG" \
+            --title "Mersel DSS Verify API ${TAG}" \
+            --notes-file release-assets/RELEASE_NOTES.md \
+            $PRERELEASE_FLAG \
+            --verify-tag \
+            "${ASSETS[@]}"
+
+          echo ""
+          echo "OK GitHub Release olusturuldu: $TAG"
+          gh release view "$TAG"
+
+  # ---------------------------------------------------------------------------
+  # Job 4: summary - Workflow summary icin ozet rapor
+  # ---------------------------------------------------------------------------
+  summary:
+    name: Release summary
+    needs: [validate, build, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          # Release: ${{ needs.validate.outputs.tag }}
+
+          | Adim | Durum |
+          |---|---|
+          | Validate | ${{ needs.validate.result }} |
+          | Build    | ${{ needs.build.result }} |
+          | Publish  | ${{ needs.publish.result }} |
+
+          - **Version**: \`${{ needs.validate.outputs.version }}\`
+          - **Tag**: \`${{ needs.validate.outputs.tag }}\`
+          - **Pre-release**: \`${{ needs.validate.outputs.is_prerelease }}\`
+          - **Release zaten vardi (skip)**: \`${{ needs.validate.outputs.release_exists }}\`
+          - **Commit**: \`${{ github.sha }}\`
+          - **Workflow Run**: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ${{ needs.publish.result == 'success' && format('[**-> GitHub Release goruntule**]({0}/{1}/releases/tag/{2})', github.server_url, github.repository, needs.validate.outputs.tag) || '' }}
+          EOF
