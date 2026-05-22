@@ -307,6 +307,9 @@ ONLINE_VALIDATION_ENABLED=true      # Online OCSP/CRL kontrolü
 VERIFICATION_STRICT_MODE=true       # Rapor seviyesi katılık: SubIndication varsa imza invalid sayılır
                                     # (Not: Bu DSS policy XML değildir; DSS validation kuralları
                                     #  için aşağıdaki "DSS Validation Policy" bölümüne bakın.)
+TR_LEGACY_XADES_TOLERANCE=true      # KamuSM/GİB üreticisinin XAdES SignedProperties Type URI
+                                    # yazım hatasına tolerans (TÜBİTAK İmzager paritesi).
+                                    # Detaylar için aşağıdaki "TR-Legacy XAdES Toleransı" bölümüne bakın.
 CERT_CACHE_TTL=3600                 # Sertifika cache süresi (saniye)
 CRL_CACHE_TTL=3600                  # CRL cache süresi (saniye)
 ```
@@ -349,6 +352,47 @@ katmanları için ayrı ayrı `RevocationDataAvailable`, `NotRevoked`,
 `AcceptableRevocationDataFound` vb. constraint'leri `FAIL/WARN/IGNORE`
 seviyesinde yapılandırabilirsiniz — DSS native policy şeması zaten
 katman bazlı (bkz. `SigningCertificate` ve `CACertificate` node'ları).
+
+#### TR-Legacy XAdES Toleransı
+
+KamuSM / GİB ekosistemindeki bazı imzalama araçları (özellikle bazı
+e-Belge entegratörlerinin eski sürümleri), XAdES `Reference` Type URI'sini
+standart dışı yazıyor:
+
+| | Type URI |
+|---|---|
+| ❌ Bazı TR araçlarında üretilen | `http://uri.etsi.org/01903/v1.3.2/XAdES.xsd#SignedProperties` |
+| ✅ ETSI TS 101 903 standardı | `http://uri.etsi.org/01903#SignedProperties` |
+
+Eclipse DSS spec'e harfiyen uyduğu için bu Type URI'yi tanımıyor ve **kriptografik olarak sağlam** imzaları bile `INDETERMINATE / SIG_CONSTRAINTS_FAILURE` ile reddediyor (BBB sebebi: `BBB_SAV_ISQPMDOSPP`). TÜBİTAK İmzager ve KamuSM doğrulama servisleri ise bu imzaları kabul ediyor.
+
+```bash
+TR_LEGACY_XADES_TOLERANCE=true      # Default: true (TÜBİTAK İmzager paritesi)
+# TR_LEGACY_XADES_TOLERANCE=false   # eIDAS-QES paralelinde davran (DSS strict)
+```
+
+Tolerans **AÇIK**ken aşağıdaki **6 koşulun TAMAMI** sağlanırsa imza
+`TOTAL_PASSED`'e yükseltilir, açıklayıcı bir uyarı `validationWarnings`'e
+eklenir:
+
+1. Indication = `INDETERMINATE`
+2. SubIndication = `SIG_CONSTRAINTS_FAILURE`
+3. DSS DiagnosticData: `signatureIntact && signatureValid` (kriptografik bütünlük)
+4. BBB SAV içinde **yalnızca** `BBB_SAV_ISQPMDOSPP` constraint'i FAIL
+5. Orijinal XML'de `01903 + .xsd + #SignedProperties` paterniyle eşleşen Type URI bulundu
+6. `verification.tr-legacy-xades-tolerance-enabled=true`
+
+**Önemli — bu jenerik bir SIG_CONSTRAINTS bypass değildir**: zayıf algoritma
+(`BBB_SAV_ISCDC`), bozuk SignedProperties digest, eksik SigningCertificate
+gibi diğer SAV constraint'leri FAIL ediyorsa imza yine reddedilir.
+
+Tolerans uygulandığında log'a tek satır kaydedilir:
+
+```
+TR legacy XAdES toleransı uygulandı (signatureId=…). DSS INDETERMINATE/
+SIG_CONSTRAINTS_FAILURE iken imza kriptografik olarak sağlam ve tek hata
+BBB_SAV_ISQPMDOSPP. Üretici Type URI: '…'
+```
 
 ### Güvenilir Kök Sertifika Resolver Kullanımı
 

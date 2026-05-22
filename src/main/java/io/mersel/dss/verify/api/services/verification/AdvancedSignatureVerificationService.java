@@ -1,6 +1,10 @@
 package io.mersel.dss.verify.api.services.verification;
 
 import eu.europa.esig.dss.detailedreport.DetailedReport;
+import eu.europa.esig.dss.detailedreport.jaxb.XmlBasicBuildingBlocks;
+import eu.europa.esig.dss.detailedreport.jaxb.XmlConstraint;
+import eu.europa.esig.dss.detailedreport.jaxb.XmlSAV;
+import eu.europa.esig.dss.detailedreport.jaxb.XmlStatus;
 import eu.europa.esig.dss.diagnostic.DiagnosticData;
 import eu.europa.esig.dss.diagnostic.SignatureWrapper;
 import eu.europa.esig.dss.diagnostic.CertificateWrapper;
@@ -26,6 +30,7 @@ import io.mersel.dss.verify.api.models.enums.SignatureType;
 import io.mersel.dss.verify.api.models.enums.VerificationLevel;
 import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService;
 import io.mersel.dss.verify.api.services.util.EcdsaXmlSignaturePreprocessor;
+import io.mersel.dss.verify.api.services.util.LegacyTurkishXadesTypeUriDetector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -63,6 +68,22 @@ public class AdvancedSignatureVerificationService {
 
     @Autowired
     private EcdsaXmlSignaturePreprocessor ecdsaXmlSignaturePreprocessor;
+
+    @Autowired
+    private LegacyTurkishXadesTypeUriDetector legacyTrXadesDetector;
+
+    /**
+     * Mesaj anahtarı: DSS BBB SAV içinde "ne message-digest ne SignedProperties
+     * mevcut" hatasının resmi adı. KamuSM/GİB üreticisinin Type URI yazım
+     * hatasında DSS yalnızca bu constraint'i FAIL eder; başka SAV check'i
+     * patlıyorsa imza gerçekten kırıktır ve toleransı UYGULAMAYIZ.
+     *
+     * <p>Kaynak: dss-validation jar →
+     * <code>BBB_SAV_ISQPMDOSPP</code>
+     * (Information Signed Qualifying Properties Message-Digest Or Signed
+     * Properties Present).</p>
+     */
+    static final String BBB_SAV_ISQPMDOSPP_KEY = "BBB_SAV_ISQPMDOSPP";
 
     // Built-in policy profilleri. signer-strict default — imzacı için
     // OCSP/CRL FAIL, ara CA için WARN. strict — eIDAS-QES paralelinde
@@ -223,8 +244,11 @@ public class AdvancedSignatureVerificationService {
                 }
             }
 
-            // Sonuçları parse et
-            VerificationResult result = parseAdvancedVerificationResult(reports, level);
+            // Sonuçları parse et. Orijinal XML byte'larını da geçiyoruz: TR-özel
+            // legacy XAdES Type URI tespitinde detector imzanın gerçekten "yanlış
+            // yazılmış Type URI'li ama kriptografik olarak sağlam" olduğunu DSS
+            // diagnostic'ten ayrı bir kanıtla doğrulayabilsin diye.
+            VerificationResult result = parseAdvancedVerificationResult(reports, level, signedBytes);
 
             logger.info("Advanced signature verification completed. Valid: {}, Signatures: {}", 
                     result.isValid(), result.getSignatures().size());
@@ -356,7 +380,8 @@ public class AdvancedSignatureVerificationService {
     /**
      * Gelişmiş doğrulama sonuçlarını parse eder
      */
-    private VerificationResult parseAdvancedVerificationResult(Reports reports, VerificationLevel level) {
+    private VerificationResult parseAdvancedVerificationResult(
+            Reports reports, VerificationLevel level, byte[] originalXmlBytes) {
         SimpleReport simpleReport = reports.getSimpleReport();
         DetailedReport detailedReport = reports.getDetailedReport();
         DiagnosticData diagnosticData = reports.getDiagnosticData();
@@ -379,15 +404,16 @@ public class AdvancedSignatureVerificationService {
         // Her imza için detaylı analiz
         for (String signatureId : signatureIds) {
             SignatureInfo sigInfo = processSignature(
-                    signatureId, 
-                    simpleReport, 
-                    detailedReport, 
-                    diagnosticData, 
-                    level
+                    signatureId,
+                    simpleReport,
+                    detailedReport,
+                    diagnosticData,
+                    level,
+                    originalXmlBytes
             );
-            
+
             signatureInfos.add(sigInfo);
-            
+
             if (!sigInfo.isValid()) {
                 allValid = false;
             }
@@ -414,7 +440,8 @@ public class AdvancedSignatureVerificationService {
             SimpleReport simpleReport,
             DetailedReport detailedReport,
             DiagnosticData diagnosticData,
-            VerificationLevel level) {
+            VerificationLevel level,
+            byte[] originalXmlBytes) {
 
         SignatureInfo sigInfo = new SignatureInfo();
         sigInfo.setSignatureId(signatureId);
@@ -422,16 +449,32 @@ public class AdvancedSignatureVerificationService {
         // Temel doğrulama sonucu
         Indication indication = simpleReport.getIndication(signatureId);
         SubIndication subIndication = simpleReport.getSubIndication(signatureId);
-        
+
+        // TR-özel tolerans değerlendirmesi: KamuSM/GİB üreticisi XAdES Type URI
+        // yazım hatasını tespit edip override edebilir miyiz? Karar tek noktada
+        // alınır, tüm aşağıdaki "isValid" akışı buradan beslenir.
+        SignatureWrapper signatureWrapper = diagnosticData.getSignatureById(signatureId);
+        boolean trToleranceApplied = applyTrLegacyXadesToleranceIfApplicable(
+                signatureId, indication, subIndication, signatureWrapper,
+                detailedReport, originalXmlBytes);
+
+        if (trToleranceApplied) {
+            // İmzayı PASSED'a yükselttik. SubIndication artık anlamsız —
+            // istemciyi yanıltmamak için temizliyoruz.
+            indication = Indication.TOTAL_PASSED;
+            subIndication = null;
+        }
+
         boolean isValid = indication == Indication.TOTAL_PASSED || indication == Indication.PASSED;
         sigInfo.setValid(isValid);
         sigInfo.setIndication(indication.name());
-        
+
         if (subIndication != null) {
             sigInfo.setSubIndication(subIndication.name());
         }
 
-        // STRICT VALIDATION: SubIndication varsa geçersiz say
+        // STRICT VALIDATION: SubIndication varsa geçersiz say. Tolerance
+        // uygulandıysa subIndication==null olduğu için bu blok zaten skip'lenir.
         if (config.isStrictMode() && subIndication != null && isValid) {
             logger.warn("STRICT MODE: Signature has SubIndication {}, marking as invalid", subIndication);
             isValid = false;
@@ -444,27 +487,35 @@ public class AdvancedSignatureVerificationService {
         }
 
         // Diagnostic data'dan imza bilgilerini al
-        SignatureWrapper signatureWrapper = diagnosticData.getSignatureById(signatureId);
         if (signatureWrapper != null) {
             processSignatureWrapper(sigInfo, signatureWrapper, level);
         }
 
-        // Validation details (comprehensive için)
+        // Validation details (comprehensive için). Tolerance uygulandıysa
+        // signatureIntact'i true'ya çekiyoruz — istemcinin "kriptografi sağlam"
+        // bilgisiyle "doğrulama bütünüyle geçti" bilgisi tutarlı olsun.
         if (level == VerificationLevel.COMPREHENSIVE) {
-            sigInfo.setValidationDetails(createComprehensiveValidationDetails(
-                    signatureId, 
-                    simpleReport, 
-                    detailedReport, 
+            ValidationDetails details = createComprehensiveValidationDetails(
+                    signatureId,
+                    simpleReport,
+                    detailedReport,
                     signatureWrapper
-            ));
+            );
+            if (trToleranceApplied) {
+                details.setSignatureIntact(true);
+            }
+            sigInfo.setValidationDetails(details);
         }
 
         // Hatalar ve uyarılar
-        collectErrorsAndWarnings(sigInfo, simpleReport, detailedReport, signatureId);
+        collectErrorsAndWarnings(sigInfo, simpleReport, detailedReport, signatureId,
+                trToleranceApplied);
 
-        // STRICT VALIDATION: Kritik hata varsa geçersiz say
+        // STRICT VALIDATION: Kritik hata varsa geçersiz say. Tolerance varken
+        // collectErrorsAndWarnings hata yerine warning ekler, dolayısıyla bu
+        // blok signal yaratmaz.
         if (config.isStrictMode() && !sigInfo.getValidationErrors().isEmpty()) {
-            logger.warn("STRICT MODE: Signature has {} validation errors, marking as invalid", 
+            logger.warn("STRICT MODE: Signature has {} validation errors, marking as invalid",
                     sigInfo.getValidationErrors().size());
             sigInfo.setValid(false);
         }
@@ -485,6 +536,131 @@ public class AdvancedSignatureVerificationService {
         }
 
         return sigInfo;
+    }
+
+    /**
+     * KamuSM / GİB üreticisinin XAdES <code>Reference Type</code> URI yazım
+     * hatasını tespit edip imzayı geçerli sayılabilir mi kararını verir.
+     *
+     * <p><b>Tolerans tüm şu koşullar sağlandığında devreye girer:</b></p>
+     * <ol>
+     *   <li>Operatör tolerance'ı kapatmamış
+     *       (<code>verification.tr-legacy-xades-tolerance-enabled=true</code>).</li>
+     *   <li>DSS indication = INDETERMINATE.</li>
+     *   <li>DSS subIndication = SIG_CONSTRAINTS_FAILURE.</li>
+     *   <li>DSS DiagnosticData'da imza kriptografik olarak sağlam:
+     *       <code>signatureIntact && signatureValid</code>.</li>
+     *   <li>BBB SAV içinde <em>tek</em> FAIL'lı constraint
+     *       <code>BBB_SAV_ISQPMDOSPP</code> — başka SAV constraint'i de
+     *       FAIL ediyorsa imza gerçekten kırıktır, ELLEMEYİZ.</li>
+     *   <li>Orijinal XML byte'larında detector,
+     *       <code>01903 .* XAdES.xsd .* #SignedProperties</code> paterniyle
+     *       eşleşen Type URI buluyor.</li>
+     * </ol>
+     *
+     * <p><b>Bu fonksiyon SADECE tespit ve karar verir.</b> Tolerans
+     * uygulandığında <code>true</code> döner; çağıran taraf indication'ı
+     * TOTAL_PASSED'e set eder.</p>
+     *
+     * @return tolerans uygulandıysa <code>true</code>; aksi halde
+     *         <code>false</code> (DSS kararı aynen kullanılmalı)
+     */
+    private boolean applyTrLegacyXadesToleranceIfApplicable(
+            String signatureId,
+            Indication indication,
+            SubIndication subIndication,
+            SignatureWrapper signatureWrapper,
+            DetailedReport detailedReport,
+            byte[] originalXmlBytes) {
+
+        if (!config.isTrLegacyXadesToleranceEnabled()) {
+            return false;
+        }
+        if (indication != Indication.INDETERMINATE) {
+            return false;
+        }
+        if (subIndication != SubIndication.SIG_CONSTRAINTS_FAILURE) {
+            return false;
+        }
+        if (signatureWrapper == null) {
+            return false;
+        }
+        if (!signatureWrapper.isSignatureIntact() || !signatureWrapper.isSignatureValid()) {
+            return false;
+        }
+        if (!isOnlyBbbSavFailureMessageDigestOrSignedProperties(detailedReport, signatureId)) {
+            return false;
+        }
+        if (originalXmlBytes == null || legacyTrXadesDetector == null) {
+            return false;
+        }
+        String hit = legacyTrXadesDetector.detect(originalXmlBytes);
+        if (hit == null) {
+            return false;
+        }
+        logger.info("TR legacy XAdES toleransı uygulandı (signatureId={}). DSS "
+                        + "INDETERMINATE/SIG_CONSTRAINTS_FAILURE iken imza kriptografik "
+                        + "olarak sağlam ve tek hata BBB_SAV_ISQPMDOSPP. Üretici Type URI: '{}'",
+                signatureId, hit);
+        return true;
+    }
+
+    /**
+     * BBB SAV blok içinde başka FAIL constraint'i olup olmadığını kontrol eder.
+     * <code>BBB_SAV_ISQPMDOSPP</code> dışında bir FAIL varsa imzayı affetmek
+     * tehlikelidir; örneğin <code>BBB_SAV_ISCDC</code> (cryptographic
+     * constraint) FAIL ise zayıf algoritma demektir, override etmemeliyiz.
+     *
+     * <p>DSS DetailedReport JAXB modelini gezerek BBB içindeki SAV
+     * constraint listesini inceler. JAXB API'ları reflection-friendly olduğu
+     * için defansif try/catch ile sarıyoruz; herhangi bir aksilikte güvenli
+     * tarafta kalıp <code>false</code> döneriz.</p>
+     */
+    private boolean isOnlyBbbSavFailureMessageDigestOrSignedProperties(
+            DetailedReport detailedReport, String signatureId) {
+        if (detailedReport == null) {
+            return false;
+        }
+        try {
+            for (XmlBasicBuildingBlocks bbb :
+                    detailedReport.getJAXBModel().getBasicBuildingBlocks()) {
+                if (!signatureId.equals(bbb.getId())) {
+                    continue;
+                }
+                XmlSAV sav = bbb.getSAV();
+                if (sav == null || sav.getConstraint() == null) {
+                    return false;
+                }
+                boolean expectedFailureSeen = false;
+                for (XmlConstraint c : sav.getConstraint()) {
+                    if (c.getStatus() == null) {
+                        continue;
+                    }
+                    if (c.getStatus() != XmlStatus.NOT_OK
+                            && c.getStatus() != XmlStatus.WARNING) {
+                        // OK / IGNORED / INFORMATION — hata değil, atla
+                        continue;
+                    }
+                    if (c.getStatus() == XmlStatus.WARNING) {
+                        // SAV warning'leri toleransı bozmaz
+                        continue;
+                    }
+                    String key = c.getName() != null ? c.getName().getKey() : null;
+                    if (BBB_SAV_ISQPMDOSPP_KEY.equals(key)) {
+                        expectedFailureSeen = true;
+                    } else {
+                        // Başka bir SAV constraint FAIL — toleransı uygulamayız
+                        logger.debug("TR XAdES toleransı uygulanmadı: BBB SAV ek "
+                                + "FAIL constraint mevcut: key={}, status={}", key, c.getStatus());
+                        return false;
+                    }
+                }
+                return expectedFailureSeen;
+            }
+        } catch (Exception e) {
+            logger.debug("TR XAdES toleransı: BBB SAV inspection hatası: {}", e.getMessage());
+        }
+        return false;
     }
 
     /**
@@ -661,22 +837,30 @@ public class AdvancedSignatureVerificationService {
     }
 
     /**
-     * Hataları ve uyarıları toplar
+     * Hataları ve uyarıları toplar.
+     *
+     * @param trToleranceApplied TR-özel XAdES Type URI tolerance bu imzaya
+     *        uygulandıysa <code>true</code>. Bu durumda DSS'in raporladığı
+     *        SIG_CONSTRAINTS_FAILURE artık <em>hata</em> değil, açıklayıcı bir
+     *        uyarıdır — istemciyi yanıltmamak için validationErrors yerine
+     *        validationWarnings'e taşırız.
      */
     private void collectErrorsAndWarnings(
             SignatureInfo sigInfo,
             SimpleReport simpleReport,
             DetailedReport detailedReport,
-            String signatureId) {
+            String signatureId,
+            boolean trToleranceApplied) {
 
         List<String> errors = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
 
-        // Simple report'tan hatalar
-        if (!simpleReport.isValid(signatureId)) {
+        // Simple report'tan hatalar. Tolerance varsa DSS bizden bağımsız
+        // INVALID raporluyor — ama biz override ettik, error LIST'ine eklemeyiz.
+        if (!simpleReport.isValid(signatureId) && !trToleranceApplied) {
             Indication indication = simpleReport.getIndication(signatureId);
             SubIndication subIndication = simpleReport.getSubIndication(signatureId);
-            
+
             String errorMsg = "İmza geçersiz: " + indication.name();
             if (subIndication != null) {
                 errorMsg += " (" + subIndication.name() + ")";
@@ -684,31 +868,42 @@ public class AdvancedSignatureVerificationService {
             errors.add(errorMsg);
         }
 
-        // SubIndication kontrolü - STRICT MODE
+        // SubIndication kontrolü
         SubIndication subIndication = simpleReport.getSubIndication(signatureId);
         if (subIndication != null) {
-            String subIndicationMsg = "İmza uyarısı: " + subIndication.name();
-            
-            // Kritik SubIndication'lar direkt hata olarak ele alınır
-            switch (subIndication) {
-                case FORMAT_FAILURE:
-                case HASH_FAILURE:
-                case SIG_CRYPTO_FAILURE:
-                case SIG_CONSTRAINTS_FAILURE:
-                case CHAIN_CONSTRAINTS_FAILURE:
-                case CERTIFICATE_CHAIN_GENERAL_FAILURE:
-                case CRYPTO_CONSTRAINTS_FAILURE:
-                case REVOKED:
-                case REVOKED_NO_POE:
-                case REVOKED_CA_NO_POE:
-                case EXPIRED:
-                case NOT_YET_VALID:
-                    errors.add(subIndicationMsg + " (Kritik hata)");
-                    logger.error("Critical SubIndication detected: {}", subIndication);
-                    break;
-                default:
-                    warnings.add(subIndicationMsg);
-                    break;
+            if (trToleranceApplied && subIndication == SubIndication.SIG_CONSTRAINTS_FAILURE) {
+                // TR-özel tolerans devrede: DSS'in SIG_CONSTRAINTS_FAILURE'ı
+                // jenerik bir kriptografik hata değil, sadece XAdES Type URI
+                // yazım hatası kaynaklı. Operatör/istemci için anlaşılır
+                // bir uyarıya çevir.
+                warnings.add("İmza, KamuSM/GİB ekosistemine özgü XAdES "
+                        + "SignedProperties Type URI yazım hatası içeriyor "
+                        + "(\"…/v1.3.2/XAdES.xsd#SignedProperties\"). "
+                        + "Kriptografik bütünlük doğrulandı; tolerans uygulandı.");
+            } else {
+                String subIndicationMsg = "İmza uyarısı: " + subIndication.name();
+
+                // Kritik SubIndication'lar direkt hata olarak ele alınır
+                switch (subIndication) {
+                    case FORMAT_FAILURE:
+                    case HASH_FAILURE:
+                    case SIG_CRYPTO_FAILURE:
+                    case SIG_CONSTRAINTS_FAILURE:
+                    case CHAIN_CONSTRAINTS_FAILURE:
+                    case CERTIFICATE_CHAIN_GENERAL_FAILURE:
+                    case CRYPTO_CONSTRAINTS_FAILURE:
+                    case REVOKED:
+                    case REVOKED_NO_POE:
+                    case REVOKED_CA_NO_POE:
+                    case EXPIRED:
+                    case NOT_YET_VALID:
+                        errors.add(subIndicationMsg + " (Kritik hata)");
+                        logger.error("Critical SubIndication detected: {}", subIndication);
+                        break;
+                    default:
+                        warnings.add(subIndicationMsg);
+                        break;
+                }
             }
         }
 

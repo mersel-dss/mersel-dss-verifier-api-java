@@ -52,6 +52,50 @@ public class VerificationConfiguration {
     @Value("${verification.ecdsa-der-preprocessor-enabled:true}")
     private boolean ecdsaDerPreprocessorEnabled;
 
+    /**
+     * <b>Türkiye-özel XAdES SignedProperties Type URI toleransı.</b>
+     *
+     * <p>Pratik problem: KamuSM / GİB ekosisteminde yaygın bir grup eski
+     * imzalama aracı, XAdES Reference Type URI'sini standart dışı yazıyor:</p>
+     * <pre>
+     *   Yanlış (üreticide görülen):  http://uri.etsi.org/01903/v1.3.2/XAdES.xsd#SignedProperties
+     *   Standart (ETSI 101 903):     http://uri.etsi.org/01903#SignedProperties
+     * </pre>
+     *
+     * <p>Eclipse DSS spec'e harfiyen uyduğu için bu imzaları
+     * <code>BBB_SAV_ISQPMDOSPP</code> ("ne message-digest ne SignedProperties
+     * mevcut") ile reddeder ve <code>INDETERMINATE / SIG_CONSTRAINTS_FAILURE</code>
+     * döndürür. Oysa TÜBİTAK İmzager ve KamuSM doğrulama servisleri bu
+     * imzaları geçerli kabul ediyor — kriptografik olarak imza ZATEN sağlam,
+     * yalnızca <code>Type</code> attribute'unda yazım hatası var.</p>
+     *
+     * <p><b>Aktifken davranış</b>: Doğrulama sonrası inceleme sırasında
+     * şu tüm koşullar aranır:</p>
+     * <ol>
+     *   <li>Indication = INDETERMINATE</li>
+     *   <li>SubIndication = SIG_CONSTRAINTS_FAILURE</li>
+     *   <li>DSS DiagnosticData'da
+     *       <code>signatureWrapper.isSignatureIntact() == true</code> ve
+     *       <code>isSignatureValid() == true</code></li>
+     *   <li>BBB SAV'da yalnızca <code>BBB_SAV_ISQPMDOSPP</code> hatası var
+     *       (başka SAV constraint'i FAIL etmemiş)</li>
+     *   <li>Orijinal XML byte'larında SignedProperties referansının
+     *       <code>Type</code> attribute'u <code>01903</code> + ".xsd" + "#SignedProperties"
+     *       paterniyle eşleşiyor (yani <em>spesifik</em> üretici hatası)</li>
+     * </ol>
+     *
+     * <p>Bu koşulların TÜMÜ sağlanmazsa imza yine geçersiz raporlanır.
+     * Yani <i>jenerik</i> bir SIG_CONSTRAINTS_FAILURE toleransı değildir;
+     * sadece bu spesifik Type URI yazım hatasını affeder.</p>
+     *
+     * <p>Default <b>açık</b>: Mersel DSS Verifier zaten Türkiye ekosistemine
+     * özgü bir doğrulayıcı. Operatör eIDAS-QES paralelinde davranmak isterse
+     * <code>verification.tr-legacy-xades-tolerance-enabled=false</code> ile
+     * kapatabilir.</p>
+     */
+    @Value("${verification.tr-legacy-xades-tolerance-enabled:true}")
+    private boolean trLegacyXadesToleranceEnabled;
+
     public String getCertStorePath() {
         return certStorePath;
     }
@@ -94,6 +138,14 @@ public class VerificationConfiguration {
 
     public void setEcdsaDerPreprocessorEnabled(boolean ecdsaDerPreprocessorEnabled) {
         this.ecdsaDerPreprocessorEnabled = ecdsaDerPreprocessorEnabled;
+    }
+
+    public boolean isTrLegacyXadesToleranceEnabled() {
+        return trLegacyXadesToleranceEnabled;
+    }
+
+    public void setTrLegacyXadesToleranceEnabled(boolean trLegacyXadesToleranceEnabled) {
+        this.trLegacyXadesToleranceEnabled = trLegacyXadesToleranceEnabled;
     }
 }
 

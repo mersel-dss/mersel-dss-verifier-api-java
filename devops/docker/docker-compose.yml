@@ -28,6 +28,18 @@ services:
       
       # CORS Configuration
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-*}
+
+      # Signature validation behavior (defaults match application.properties).
+      # Override in your .env file if you need to deviate from the TR-aware,
+      # signer-strict baseline.
+      - ONLINE_VALIDATION_ENABLED=${ONLINE_VALIDATION_ENABLED:-true}
+      - VERIFICATION_STRICT_MODE=${VERIFICATION_STRICT_MODE:-true}
+      - DSS_POLICY_PROFILE=${DSS_POLICY_PROFILE:-signer-strict}
+      - DSS_POLICY_PATH=${DSS_POLICY_PATH:-}
+      # Turkey-specific XAdES SignedProperties Type URI tolerance.
+      # Default: true (KamuSM/GIB ecosystem parity with TUBITAK Imzager).
+      # Set to false for strict eIDAS-QES behavior.
+      - TR_LEGACY_XADES_TOLERANCE=${TR_LEGACY_XADES_TOLERANCE:-true}
     volumes:
       # Mount test documents (development)
       - ../../resources/test-documents:/app/test-documents:ro

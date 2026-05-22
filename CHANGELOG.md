@@ -7,6 +7,43 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+### Added
+- **TR-Legacy XAdES SignedProperties Type URI toleransi**: KamuSM / GIB
+  ekosistemindeki bazi imzalama araclari, XAdES `Reference` Type URI'sini
+  standart disi yaziyor (ornek: `http://uri.etsi.org/01903/v1.3.2/XAdES.xsd#SignedProperties`,
+  standartta olmasi gereken `http://uri.etsi.org/01903#SignedProperties`).
+  Eclipse DSS spec'e harfiyen uydugu icin bu imzalari `INDETERMINATE /
+  SIG_CONSTRAINTS_FAILURE` ile reddederken, TUBITAK Imzager ve KamuSM tarafi
+  bu imzalari kabul ediyor. Bu surumden itibaren Mersel DSS Verifier de —
+  kriptografik butunluk dogruysa — bu Turkiye-ozel uretici hatasini affediyor.
+  - Yeni utility: `LegacyTurkishXadesTypeUriDetector` (byte-level pattern
+    matching, jenerik bir SIG_CONSTRAINTS bypass'i degil; `01903 + .xsd +
+    #SignedProperties` paterni dis,inda hicbir SIG_CONSTRAINTS_FAILURE turunu
+    affetmez).
+  - `AdvancedSignatureVerificationService.processSignature(...)`: tolerans
+    altI kosulun tumu saglandiginda devreye girer (config flag, indication,
+    subIndication, `signatureIntact && signatureValid`, BBB SAV'da yalniz
+    `BBB_SAV_ISQPMDOSPP` FAIL, XML'de patern eslesmesi).
+  - Override edildiginde DSS'in `INDETERMINATE` indication'i `TOTAL_PASSED`'e
+    yukseltilir, `validationErrors` yerine acik bir `validationWarnings` mesaji
+    olusturulur, `verification.log`'a olay tek satirda kaydedilir.
+  - 11 unit test (`LegacyTurkishXadesTypeUriDetectorTest`): standart URI'ler
+    (xades111, xades122, xades132), case insensitive Reference/Type/prefix
+    varyasyonlari, Turkce karakter encoding, false-positive trap'leri.
+- Konfigurasyon flag'i: `verification.tr-legacy-xades-tolerance-enabled`
+  - ENV var: `TR_LEGACY_XADES_TOLERANCE` (default `true`).
+  - Default `true` olmasinin nedeni: bu API zaten Turkiye ekosistemi icin
+    uretildi; TUBITAK Imzager paralelinde davranmasi onceliklidir.
+  - eIDAS-QES paralelinde davranmak isteyen kurumsal operatorler `false`
+    yaparak DSS'in stricte davranisina geri donebilir.
+
+### Changed
+- `AdvancedSignatureVerificationService.collectErrorsAndWarnings(...)` artik
+  TR-toleransi farkindadir; toleransli imzalarda `validationErrors` listesini
+  bos birakir, sebebi `validationWarnings`'e operatore yonelik dille yazar.
+- `VerificationConfiguration` sinifina `trLegacyXadesToleranceEnabled` getter/
+  setter ve detayli javadoc eklendi.
+
 ## [0.2.1] - 2026-05-22
 
 ### Added
