@@ -7,6 +7,8 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-22
+
 ### Added
 - **TR-Legacy XAdES SignedProperties Type URI toleransi**: KamuSM / GIB
   ekosistemindeki bazi imzalama araclari, XAdES `Reference` Type URI'sini
