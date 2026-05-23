@@ -7,6 +7,8 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-23
+
 ### Added
 - **XAdES paketleme tipi raporlamasi** (`SignatureInfo.signaturePackaging`):
   Her XAdES imzasi icin paketleme tipi W3C XMLDSig terminolojisiyle
