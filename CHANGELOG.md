@@ -8,6 +8,41 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 ## [Unreleased]
 
 ### Added
+- **XAdES paketleme tipi raporlamasi** (`SignatureInfo.signaturePackaging`):
+  Her XAdES imzasi icin paketleme tipi W3C XMLDSig terminolojisiyle
+  raporlaniyor — `ENVELOPED` (imza belgenin icinde, UBL e-Fatura kalibi),
+  `ENVELOPING` (data `ds:Object` icinde) veya `DETACHED` (data ayri). DSS
+  6.3 bu bilgiyi verification akisinda hicbir reports/diagnostic alaninda
+  expose etmiyor (sadece imza URETIRKEN parametre aliyor); biz DOM
+  seviyesinde `ds:SignedInfo/ds:Reference` yapisini okuyarak tespit
+  ediyoruz.
+  - Yeni enum: `SignaturePackaging` — sabit isimleri DSS upstream
+    `eu.europa.esig.dss.enumerations.SignaturePackaging` ile birebir ayni
+    (istemcide mapping katmani gerekmez).
+  - Yeni utility: `XadesSignaturePackagingDetector` — tip-bazli,
+    sira-bagimsiz algoritma. `Reference.Type` attribute'una gore meta
+    referanslari (SignedProperties, KeyInfo/X509Data, KamuSM legacy
+    `…/v1.3.2/XAdES.xsd#SignedProperties` varyanti dahil) paketleme
+    kararindan disliyor, kalan data ref(ler)i icin
+    `enveloped-signature` transform / bos URI / `#objId` -> internal
+    `ds:Object` ayrimini yapiyor.
+  - `AdvancedSignatureVerificationService` wiring: validator'dan
+    `AdvancedSignature` listesi alinip her imza icin paketleme
+    hesaplaniyor; `signatureId -> packaging` map'i `processSignature`'a
+    aktariliyor. CAdES/PAdES icin alan `null` -> `@JsonInclude(NON_NULL)`
+    sayesinde JSON'a dusmuyor.
+  - Best-effort: DOM tespit hatasi verification akisini bloklamaz, WARN
+    log dusup paketleme alani null geri doner.
+  - 13 unit test (`XadesSignaturePackagingDetectorTest`): TUBITAK BES
+    sirasi (SignedProperties once), DSS-orijinal sirasi (data once),
+    URI=#objId iC ds:Object, external URI, AXA SIGORTA e-Fatura
+    ApplicationResponse regresyon testi, KamuSM legacy SignedProperties
+    Type URI meta-filtreleme, UnsignedSignatureProperties altindaki
+    nested Reference'larin yoksayilmasi.
+  - 4 unit test (`SignatureInfoTest`): setter/getter round-trip, null
+    default, JSON enum sabit-adi serializasyonu, `NON_NULL` davranisi.
+  - 2 unit test (`SignaturePackagingTest`): enum sabit isimleri W3C/DSS
+    upstream uyumu, arity guard.
 - **Applied Suppressions / audit trail**: Mersel DSS Verifier'in DSS karari
   uzerine *override* uyguladigi her durum artik response icinde yapilandirilmis
   olarak raporlaniyor. Yeni `signatures[i].appliedSuppressions` alani:

@@ -19,6 +19,7 @@ import eu.europa.esig.dss.spi.x509.aia.DefaultAIASource;
 import eu.europa.esig.dss.service.crl.OnlineCRLSource;
 import eu.europa.esig.dss.service.ocsp.OnlineOCSPSource;
 import eu.europa.esig.dss.service.http.commons.CommonsDataLoader;
+import eu.europa.esig.dss.spi.signature.AdvancedSignature;
 import eu.europa.esig.dss.spi.validation.CertificateVerifier;
 import eu.europa.esig.dss.spi.validation.CommonCertificateVerifier;
 import eu.europa.esig.dss.validation.SignedDocumentValidator;
@@ -26,12 +27,14 @@ import eu.europa.esig.dss.validation.reports.Reports;
 import io.mersel.dss.verify.api.config.VerificationConfiguration;
 import io.mersel.dss.verify.api.exceptions.VerificationException;
 import io.mersel.dss.verify.api.models.*;
+import io.mersel.dss.verify.api.models.enums.SignaturePackaging;
 import io.mersel.dss.verify.api.models.enums.SignatureType;
 import io.mersel.dss.verify.api.models.enums.SuppressionCode;
 import io.mersel.dss.verify.api.models.enums.VerificationLevel;
 import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService;
 import io.mersel.dss.verify.api.services.util.EcdsaXmlSignaturePreprocessor;
 import io.mersel.dss.verify.api.services.util.LegacyTurkishXadesTypeUriDetector;
+import io.mersel.dss.verify.api.services.util.XadesSignaturePackagingDetector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -72,6 +75,9 @@ public class AdvancedSignatureVerificationService {
 
     @Autowired
     private LegacyTurkishXadesTypeUriDetector legacyTrXadesDetector;
+
+    @Autowired
+    private XadesSignaturePackagingDetector xadesPackagingDetector;
 
     /**
      * Mesaj anahtarı: DSS BBB SAV içinde "ne message-digest ne SignedProperties
@@ -245,11 +251,21 @@ public class AdvancedSignatureVerificationService {
                 }
             }
 
+            // XAdES paketleme (ENVELOPED/ENVELOPING/DETACHED) tipini DSS
+            // diagnostic'te bulamıyoruz — DSS bu bilgiyi yalnızca imza
+            // ÜRETİRKEN parametre alıyor, verification'da raporlamıyor.
+            // İmza başına AdvancedSignature.getSignatureElement() DOM'u
+            // üzerinden hesaplayıp signatureId -> packaging map'i kuruyoruz.
+            // CAdES/PAdES için map boş kalır; XAdES dışı imzalarda alan
+            // JSON'a hiç düşmez (SignatureInfo NON_NULL).
+            Map<String, SignaturePackaging> packagingBySignatureId = computeXadesPackaging(validator);
+
             // Sonuçları parse et. Orijinal XML byte'larını da geçiyoruz: TR-özel
             // legacy XAdES Type URI tespitinde detector imzanın gerçekten "yanlış
             // yazılmış Type URI'li ama kriptografik olarak sağlam" olduğunu DSS
             // diagnostic'ten ayrı bir kanıtla doğrulayabilsin diye.
-            VerificationResult result = parseAdvancedVerificationResult(reports, level, signedBytes);
+            VerificationResult result = parseAdvancedVerificationResult(
+                    reports, level, signedBytes, packagingBySignatureId);
 
             logger.info("Advanced signature verification completed. Valid: {}, Signatures: {}", 
                     result.isValid(), result.getSignatures().size());
@@ -379,10 +395,51 @@ public class AdvancedSignatureVerificationService {
     }
 
     /**
+     * Her XAdES imzası için paketleme tipini (ENVELOPED / ENVELOPING /
+     * DETACHED) {@code signatureId -> packaging} map'i olarak hesaplar.
+     *
+     * <p>DSS bu bilgiyi verification akışında hiçbir reports/diagnostic
+     * alanında expose etmiyor; tek yol {@code SignedDocumentValidator}'dan
+     * {@link AdvancedSignature} listesini alıp DOM seviyesinde
+     * {@code ds:SignedInfo/ds:Reference} yapısını okumak.</p>
+     *
+     * <p>CAdES/PAdES imzaları için detector {@code null} döner — bu sayede
+     * map'e hiç girmezler ve {@code SignatureInfo.signaturePackaging} alanı
+     * onlar için JSON'da görünmez ({@code NON_NULL}).</p>
+     *
+     * @param validator çalıştırılmış (validateDocument sonrası) DSS validator
+     * @return signatureId -> {@link SignaturePackaging} map'i; başarısızlık
+     *         durumunda boş map (doğrulama akışını bozmaz)
+     */
+    private Map<String, SignaturePackaging> computeXadesPackaging(SignedDocumentValidator validator) {
+        Map<String, SignaturePackaging> result = new HashMap<>();
+        try {
+            List<AdvancedSignature> sigs = validator.getSignatures();
+            if (sigs == null || sigs.isEmpty()) {
+                return result;
+            }
+            for (AdvancedSignature sig : sigs) {
+                SignaturePackaging packaging = xadesPackagingDetector.detect(sig);
+                if (packaging != null) {
+                    result.put(sig.getId(), packaging);
+                }
+            }
+        } catch (Exception e) {
+            // Paketleme tespiti best-effort'tür; başarısızlık doğrulamayı
+            // bloklamamalı. WARN ile not düşüp boş map dönüyoruz.
+            logger.warn("XAdES packaging detection failed: {}", e.getMessage());
+        }
+        return result;
+    }
+
+    /**
      * Gelişmiş doğrulama sonuçlarını parse eder
      */
     private VerificationResult parseAdvancedVerificationResult(
-            Reports reports, VerificationLevel level, byte[] originalXmlBytes) {
+            Reports reports,
+            VerificationLevel level,
+            byte[] originalXmlBytes,
+            Map<String, SignaturePackaging> packagingBySignatureId) {
         SimpleReport simpleReport = reports.getSimpleReport();
         DetailedReport detailedReport = reports.getDetailedReport();
         DiagnosticData diagnosticData = reports.getDiagnosticData();
@@ -410,7 +467,8 @@ public class AdvancedSignatureVerificationService {
                     detailedReport,
                     diagnosticData,
                     level,
-                    originalXmlBytes
+                    originalXmlBytes,
+                    packagingBySignatureId
             );
 
             signatureInfos.add(sigInfo);
@@ -442,10 +500,18 @@ public class AdvancedSignatureVerificationService {
             DetailedReport detailedReport,
             DiagnosticData diagnosticData,
             VerificationLevel level,
-            byte[] originalXmlBytes) {
+            byte[] originalXmlBytes,
+            Map<String, SignaturePackaging> packagingBySignatureId) {
 
         SignatureInfo sigInfo = new SignatureInfo();
         sigInfo.setSignatureId(signatureId);
+
+        // XAdES paketleme tipini (ENVELOPED/ENVELOPING/DETACHED) set et.
+        // Map'te yoksa (XAdES değilse veya DOM tespiti başarısızsa) null kalır
+        // ve SignatureInfo @JsonInclude(NON_NULL) sayesinde JSON'a düşmez.
+        if (packagingBySignatureId != null) {
+            sigInfo.setSignaturePackaging(packagingBySignatureId.get(signatureId));
+        }
 
         // Temel doğrulama sonucu
         Indication indication = simpleReport.getIndication(signatureId);

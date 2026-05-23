@@ -1,6 +1,7 @@
 package io.mersel.dss.verify.api.models;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import io.mersel.dss.verify.api.models.enums.SignaturePackaging;
 
 import java.util.Date;
 import java.util.List;
@@ -14,6 +15,23 @@ public class SignatureInfo {
     private boolean valid;
     private String signatureFormat;
     private String signatureLevel;
+    /**
+     * XAdES paketleme tipi — W3C XMLDSig terminolojisi
+     * ({@link SignaturePackaging#ENVELOPED} / {@link SignaturePackaging#ENVELOPING}
+     * / {@link SignaturePackaging#DETACHED}). XAdES dışı (CAdES/PAdES)
+     * imzalar için {@code null} — JSON çıktısına da düşmez
+     * ({@code NON_NULL}).
+     *
+     * <p>Hesaplama {@code AdvancedSignatureVerificationService} içinde
+     * W3C XMLDSig kurallarına göre {@code ds:SignedInfo/ds:Reference}
+     * {@code Type} attribute'u ve {@code Transform} listesi üzerinden
+     * tip-bazlı (sıra-bağımsız) yapılır — TÜBİTAK BES'in pozisyonel
+     * beklentisine bağımlı değildir.</p>
+     *
+     * @see <a href="https://www.w3.org/TR/xmldsig-core/#sec-Signature">W3C XMLDSig §4.3</a>
+     * @see <a href="https://www.etsi.org/deliver/etsi_en/319100_319199/31913201/">ETSI EN 319 132-1</a>
+     */
+    private SignaturePackaging signaturePackaging;
     private Date signingTime;
     private Date claimedSigningTime;
     private CertificateInfo signerCertificate;
@@ -75,6 +93,14 @@ public class SignatureInfo {
 
     public void setSignatureLevel(String signatureLevel) {
         this.signatureLevel = signatureLevel;
+    }
+
+    public SignaturePackaging getSignaturePackaging() {
+        return signaturePackaging;
+    }
+
+    public void setSignaturePackaging(SignaturePackaging signaturePackaging) {
+        this.signaturePackaging = signaturePackaging;
     }
 
     public Date getSigningTime() {
