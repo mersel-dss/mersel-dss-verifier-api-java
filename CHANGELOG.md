@@ -8,7 +8,169 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 ## [Unreleased]
 
 ### Added
-- **`chainRevocationStatus` — SIMPLE modda da zincir geneli ozet**:
+- **AIA (Authority Information Access) normalizing + caching katmani**:
+  Eimzatr ekosistemindeki bazi ESHS'ler (ornek
+  `http://depo.e-imzatriptal.com/sertifika/neshs-v3.cer`) ara CA sertifikasini
+  `Content-Type: application/pkix-cert` ile servis ederken **raw DER yerine
+  naked base64-encoded text** donuyor. Java `CertificateFactory` raw DER veya
+  BEGIN/END header'li PEM kabul eder; naked base64'u reddeder ve DSS
+  `NO_CERTIFICATE_CHAIN_FOUND` doner — gercerli bir imza zinciri ZINCIRSIZ
+  goruluyordu. Yeni `NormalizingCachingAiaDataLoader` bu naked base64
+  payload'larini decode edip DER'e cevirir; ayrica Caffeine cache ile ayni
+  ara CA URL'ine yalnizca bir kez gidilir.
+  - Yeni sinif: `NormalizingCachingAiaDataLoader implements DataLoader`
+    (`services/aia` paketinde). Bir delegate DataLoader'i (tipik
+    `CommonsDataLoader`) sarar. Normalize sirasi (idempotent — zaten DER
+    veya PEM olana dokunmaz):
+    1. DER mi? (`0x30 0x82` prefix — X.509 long-form length tag) → as-is.
+    2. PEM mi? (`-----BEGIN` marker'i ilk 64 byte icinde) → as-is.
+    3. Naked base64 mi? Whitespace strip + MIME decode + DER prefix
+       kontrolu → decoded DER doner.
+    4. Hicbiri eslesmezse orijinali doner (WARN log + hex prefix dump);
+       DSS kendi hatasini raporlasin, biz maskeleyip yanlis bir sey
+       uretmiyoruz.
+  - Negative caching: bos response veya null da cache'lenir (kisa TTL'de
+    ayni patolojik URL'i tekrar fetch etmek yerine memo'dan null doner).
+    Exception ise cache'lenmez — transient olabilir, DSS retry'a aciktir.
+  - Cache wiring: `RevocationServicesConfiguration` artik AIA icin bu
+    decorator'i kuruyor; Caffeine cache Spring Boot Actuator uzerinden
+    Prometheus'a publish ediliyor (`cache_size{cache="mersel.aia.fetch"}`,
+    `cache_gets_total{cache="mersel.aia.fetch", result="hit|miss"}`,
+    `cache_puts_total`, `cache_evictions_total`).
+  - 2 yeni parametre (env var ile override edilebilir):
+    - `verification.aia.cache.max-size` (default `256` — KamuSM
+      ekosisteminde aktif ara CA sayisi <=20, 256 haftalarca rahat
+      yeter).
+    - `verification.aia.cache.ttl-seconds` (default `86400` = 24 saat —
+      ara CA sertifikalarinin gecerlilik suresi yillarca oldugu icin
+      gunluk TTL guvenli).
+  - Serialization opt-out: `DataLoader` interface'i Serializable extends
+    ettigi icin compiler `NormalizingCachingAiaDataLoader`'a da
+    Serializable ekliyor; ancak canli durumu (HTTP delegate + Caffeine
+    cache) transient — deserialize'da her ikisi de null olur ve sonraki
+    cagri NPE atar. Bu durumu erkenden yakalamak icin sinifa `writeObject`
+    ve `readObject` eklendi; her ikisi de `NotSerializableException`
+    firlatir. Spring singleton bean yanlislikla session replication /
+    distributed cache'e girerse runtime'da net hata alinir.
+  - 24 yeni unit test (`NormalizingCachingAiaDataLoaderTest`): DER
+    passthrough, PEM passthrough, naked base64 decode (sentetik 1500+ byte
+    X.509 sertifikasi ile), Eimzatr endpoint regresyon repro'su,
+    cache-hit-miss-eviction davranisi, negative caching, exception
+    transient'ligi, multi-URL `get(List)` delegasyonu, `setContentType`
+    passthrough, constructor invariant'lari (null delegate / negative
+    cache size / negative TTL), serialization opt-out.
+
+- **XAdES tek referansli imza patolojisi icin `RejectionCode` framework'u**:
+  Mersel DSS Verifier artik DSS verdict'i `INVALID` olan imzalar icin de
+  Turkiye ekosistemine ozgu **kataloglu tani kodu** raporlayabiliyor.
+  `AppliedSuppression` (DSS INVALID → biz VALID, override) ile semantik
+  olarak farkli yeni bir konsept: `AppliedRejection` (DSS INVALID → biz de
+  INVALID, ama "neden" sorusuna kataloglu kod + somut kanit ile cevap
+  veririz). Verdict degismez; yalniz tani kanali zenginlestirilir.
+  - Yeni enum: `RejectionCode` (`models/enums` paketinde). Naming
+    convention `MDSS-{LAYER}-{DESCRIPTIVE-SLUG}` — `SuppressionCode` ile
+    ayni semayi paylasir; ayni kod hem suppression hem rejection olarak
+    gorunmez (ekleme sirasinda calisma kontrolu yapilir).
+  - Yeni model: `AppliedRejection` (`@JsonInclude(NON_NULL)`). Alanlar
+    `code`, `title`, `reason`, `severity`, `originalIndication`,
+    `originalSubIndication`, `evidence` (immutable map), `docsUrl`. Audit/
+    compliance icin DSS'in *gercek* kararini (override oncesi) muhafaza
+    eder — denetleyici "DSS aslinda ne demisti, biz neden bu kodu
+    ekledik?" sorusuna kesin cevap alir.
+  - Yeni alan: `SignatureInfo.appliedRejections` (List). Bos veya null ise
+    DSS'in jenerik subIndication'i tek basina yeterli kabul edildi
+    demektir.
+  - Ilk kayitli kod: **`MDSS-XADES-LEGACY-TR-MISSING-SP-REFERENCE`** —
+    XAdES imza yalnizca bir `<ds:Reference>` tasiyor; `<xades:SignedProperties>`
+    elementi XML icinde mevcut fakat hicbir Reference ona pointing degil.
+    ETSI EN 319 132-1 (XAdES-BES) iki referans (biri belge body'si, biri
+    SignedProperties) zorunlulugu ihlali. Sonuc: `SigningTime`,
+    `SigningCertificate` digest, `SignaturePolicyIdentifier`,
+    `SignerRole`, `CommitmentTypeIndication` gibi imzanin anlamini
+    tasiyan alanlar imza kapsami disinda kalir; post-signing modifiye
+    edilebilir ve imza yine matematik olarak dogrulanir. Yapisal hata
+    imzayi ureten yazilimda; iki referans uretilmelidir.
+  - Severity `ERROR`. Verdict her zaman `INVALID`; rejection objesi
+    yalnizca tani kanalidir. Operator DSS'in jenerik
+    `SIG_CONSTRAINTS_FAILURE`'i yerine spesifik Mersel kodu ile yapisal
+    nedeni gorur, log/grep ile filtreleyebilir.
+  - Konfigurasyon flag'i: **`verification.tr-legacy-xades-rejection-enrichment-enabled`**
+    (default `true`). Bu flag yalnizca tani kanalini kontrol eder; imzanin
+    `valid=false` davranisini DEGISTIRMEZ. Operator enrichment'i kapatmak
+    isterse Mersel kodu uretilmez, DSS'in jenerik subIndication'i tek
+    basina raporlanir.
+  - Detector genisletmesi (`LegacyTurkishXadesTypeUriDetector`): yeni P3
+    patolojisi (MISSING_SP_REFERENCE) eklendi. P1/P2 (TYPE_URI varyantlari,
+    suppression) onceligini korur — ilk eslesme doner. Detector artik
+    `LegacyTurkishXadesAnomaly` immutable kayit doner (kind + evidence);
+    eski `String detect(byte[])` API'si yeni `LegacyTurkishXadesAnomaly
+    detectAnomaly(byte[])` ile yer degistirdi (canonical API).
+  - **Per-SignedProperties-Id evaluation**: P3 mantigi multi-signature
+    senaryolarini da dogru ele alir. Tek SP varsa konservatif Type-only
+    fallback korunur (geriye donuk uyum); birden fazla SP varsa her Id
+    icin ayri URI fragment kontrolu yapilir, Type-only fallback
+    uygulanmaz (hangi SP'ye isaret ettigi belirsiz). "A bagli, B degil"
+    senaryosunda B artik dogru flag edilir.
+  - 16 yeni unit test (`LegacyTurkishXadesTypeUriDetectorTest` P3
+    bolumu): standart XAdES'te P3 atlanmasi, sadece URI fragment ile
+    bagli SP, sadece Type ile bagli SP (konservatif fallback), multi-sig
+    tum bagli, multi-sig mixed (A bagli + B bagsiz → B flag), multi-sig
+    her ikisi de bagsiz (ilk dokuman sirasinda flag), Type URI varyanti
+    onceligi (P1/P2 P3'ten once kazanir), SignedProperties yok, prefixsiz
+    namespace.
+  - 9 yeni unit test (`AppliedRejectionTest`): code/severity sabitleri,
+    docs URL sabiti, immutability, SignatureInfo exposure, JSON
+    serialization, `@JsonInclude(NON_NULL)` davranisi, RejectionCode
+    namespace'inin SuppressionCode ile carismamasi.
+
+- **`docs/rejections/` dokumantasyon klasoru**: Her kayitli `RejectionCode`
+  icin detayli MD sayfasi.
+  - [`docs/rejections/README.md`](docs/rejections/README.md) — index +
+    naming convention + kararlilik kurallari + severity rehberi +
+    contributor guide.
+  - [`docs/rejections/MDSS-XADES-LEGACY-TR-MISSING-SP-REFERENCE.md`](docs/rejections/MDSS-XADES-LEGACY-TR-MISSING-SP-REFERENCE.md)
+    — sorun ozeti, dogru iki-referansli yapi vs. tek-referansli regresyon,
+    saldiri yuzeyi tablosu (SigningTime / SigningCertificate /
+    SignaturePolicyIdentifier / SignerRole / CommitmentTypeIndication
+    icin tahrifat senaryolari ve pratik etkileri), yasal uyumluluk
+    cercevesi (eIDAS / 5070 sayili kanun / ETSI EN 319 132-1), cozum
+    (imzayi ureten yazilimin sorumlulugu — iki referans uretmelidir),
+    tetik kosullari, API yanit ornegi, log ornegi.
+  - [`docs/suppressions/README.md`](docs/suppressions/README.md) altina
+    rejection klasorune cross-reference notu eklendi.
+
+### Changed
+- **`AdvancedSignatureVerificationService.processSignature(...)` —
+  TR-ozel patoloji degerlendirmesi tekleştirildi**: gate kontrolu ve
+  detector cagrisi tek bir noktada yapiliyor; sonuc (anomaly objesi) iki
+  evaluate metodu arasinda paylasiliyor. Eskiden `evaluateTrLegacyXadesTolerance`
+  ve `evaluateTrLegacyXadesRejection` ayri ayri `matchesTrLegacyXadesGate`
+  + `detectAnomaly` cagiriyordu — buyuk UBL faturalarda (100KB+) ayni XML
+  iki kez regex parse ediliyordu. Yeni akis tek pass.
+  - Evaluate metodlarinin imzalari sadelesti: `signatureWrapper`,
+    `detailedReport`, `originalXmlBytes` parametreleri cikarildi; yerine
+    onceden tespit edilmis `LegacyTurkishXadesAnomaly` objesi geliyor.
+- **`AdvancedSignatureVerificationService.collectErrorsAndWarnings(...)` —
+  rejection enrichment iken cift hata satiri kaldirildi**: Rejection
+  devredeyken `validationErrors` icine iki ayri satir ekleniyordu:
+  - `[MDSS-XADES-LEGACY-TR-MISSING-SP-REFERENCE] <reason>` (Mersel
+    kataloglu).
+  - `Imza uyarisi: SIG_CONSTRAINTS_FAILURE (Kritik hata)` (DSS jenerik).
+  API tuketicileri "kac hata var?" sorusunda iki cevap aliyordu, ayni
+  yapisal sorun icin tekrarli bilgi. Artik rejection devredeyken jenerik
+  satir atlanir; Mersel kataloglu satir tek ana hata olarak kalir.
+- **`LegacyTurkishXadesTypeUriDetector` API canonical'i degisti**:
+  `detect(byte[])` (eski) → `detectAnomaly(byte[])` (yeni). Eski API
+  P3 patolojisini raporlayamadigi icin yeni canonical metoda gecis
+  yapildi; her caller `LegacyTurkishXadesAnomaly` objesini alir.
+
+### Fixed
+- **Multi-signature `MISSING_SP_REFERENCE` false-negative'i**: Detector'in
+  onceki fast-negative gate'i ("XML'de herhangi bir Type=SP Reference
+  varsa P3'u atla") multi-signature senaryosunda Signature-B'nin
+  bagsiz SignedProperties'ini kaciriyordu (Signature-A'nin dogru
+  Reference'i butun XML icin gate'i kapatiyordu). Yeni per-SP-Id mantik
+  her Id'yi bagimsiz degerlendirir.
   Once SIMPLE mod tuketicisi yalniz `signerCertificate.revocation`'i goruyordu
   — "leaf GOOD ama bir ara CA REVOKED" gibi senaryolar yalniz COMPREHENSIVE
   modda `certificateChain[].revocation` alt nesneleriyle ifsa ediliyordu.

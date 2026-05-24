@@ -196,6 +196,43 @@ public class VerificationConfiguration {
     @Value("${verification.tr-legacy-xades-tolerance-enabled:true}")
     private boolean trLegacyXadesToleranceEnabled;
 
+    /**
+     * XAdES tek-referanslı imza patolojisi için rejection enrichment
+     * (MISSING SignedProperties reference). DSS imzayı zaten INVALID döner;
+     * bu flag yalnızca <em>tanı kanalını</em> kontrol eder: açıkken
+     * detector patolojiyi tespit ederse {@link
+     * io.mersel.dss.verify.api.models.AppliedRejection} objesi üretilip
+     * {@link io.mersel.dss.verify.api.models.SignatureInfo#getAppliedRejections()}
+     * altına yazılır; kapalıyken patoloji tespit edilse de obje üretilmez
+     * ve DSS'in jenerik SIG_CONSTRAINTS_FAILURE'ı tek başına raporlanır.
+     *
+     * <p>Default <b>açık</b>: Mersel tanı kodlarının operatör tarafında
+     * görünür olması ekosistem için fayda. Operatör bu enrichment'ı
+     * istemiyorsa
+     * <code>verification.tr-legacy-xades-rejection-enrichment-enabled=false</code>
+     * ile kapatabilir; imzanın <code>valid=false</code> davranışı her
+     * koşulda DSS akışından gelir, bu flag verdict'i değiştirmez.</p>
+     */
+    @Value("${verification.tr-legacy-xades-rejection-enrichment-enabled:true}")
+    private boolean trLegacyXadesRejectionEnrichmentEnabled;
+
+    /**
+     * AIA (Authority Information Access) cache'i için maks giriş sayısı.
+     * KamuSM ekosisteminde aktif ara CA sayısı çok düşük (≤20 endpoint);
+     * 256 default haftalarca rahat yeter. Cache TTL içinde aynı CA Issuer
+     * URL'ine ikinci kez gidilmesini engeller.
+     */
+    @Value("${verification.aia.cache.max-size:256}")
+    private long aiaCacheMaxSize;
+
+    /**
+     * AIA cache TTL (saniye). Default 24 saat. Ara CA sertifikalarının
+     * geçerlilik süresi yıllarca, dolayısıyla agresif cache tamamen güvenli;
+     * yalnız "yeni ara CA fetched" log'unu çok sık görmemek için uzun TTL.
+     */
+    @Value("${verification.aia.cache.ttl-seconds:86400}")
+    private long aiaCacheTtlSeconds;
+
     public String getCertStorePath() {
         return certStorePath;
     }
@@ -326,6 +363,30 @@ public class VerificationConfiguration {
 
     public void setTrLegacyXadesToleranceEnabled(boolean trLegacyXadesToleranceEnabled) {
         this.trLegacyXadesToleranceEnabled = trLegacyXadesToleranceEnabled;
+    }
+
+    public boolean isTrLegacyXadesRejectionEnrichmentEnabled() {
+        return trLegacyXadesRejectionEnrichmentEnabled;
+    }
+
+    public void setTrLegacyXadesRejectionEnrichmentEnabled(boolean trLegacyXadesRejectionEnrichmentEnabled) {
+        this.trLegacyXadesRejectionEnrichmentEnabled = trLegacyXadesRejectionEnrichmentEnabled;
+    }
+
+    public long getAiaCacheMaxSize() {
+        return aiaCacheMaxSize;
+    }
+
+    public void setAiaCacheMaxSize(long aiaCacheMaxSize) {
+        this.aiaCacheMaxSize = aiaCacheMaxSize;
+    }
+
+    public long getAiaCacheTtlSeconds() {
+        return aiaCacheTtlSeconds;
+    }
+
+    public void setAiaCacheTtlSeconds(long aiaCacheTtlSeconds) {
+        this.aiaCacheTtlSeconds = aiaCacheTtlSeconds;
     }
 }
 

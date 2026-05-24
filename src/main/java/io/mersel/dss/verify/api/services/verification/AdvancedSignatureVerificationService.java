@@ -28,10 +28,12 @@ import io.mersel.dss.verify.api.exceptions.VerificationException;
 import io.mersel.dss.verify.api.models.*;
 import io.mersel.dss.verify.api.models.enums.SignaturePackaging;
 import io.mersel.dss.verify.api.models.enums.SignatureType;
+import io.mersel.dss.verify.api.models.enums.RejectionCode;
 import io.mersel.dss.verify.api.models.enums.SuppressionCode;
 import io.mersel.dss.verify.api.models.enums.VerificationLevel;
 import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService;
 import io.mersel.dss.verify.api.services.util.EcdsaXmlSignaturePreprocessor;
+import io.mersel.dss.verify.api.services.util.LegacyTurkishXadesAnomaly;
 import io.mersel.dss.verify.api.services.util.LegacyTurkishXadesTypeUriDetector;
 import io.mersel.dss.verify.api.services.util.RevocationInfoExtractor;
 import io.mersel.dss.verify.api.services.util.XadesSignaturePackagingDetector;
@@ -556,15 +558,37 @@ public class AdvancedSignatureVerificationService {
         Indication indication = simpleReport.getIndication(signatureId);
         SubIndication subIndication = simpleReport.getSubIndication(signatureId);
 
-        // TR-özel tolerans değerlendirmesi: KamuSM/GİB üreticisi XAdES Type URI
-        // yazım hatasını tespit edip override edebilir miyiz? Karar tek noktada
-        // alınır; suppression objesi başarıysa null değildir ve audit kanalına
-        // (sigInfo.appliedSuppressions) eklenir.
+        // TR-özel XAdES patoloji değerlendirmesi. İki ayrı yol var:
+        //   1) SUPPRESSION: DSS INVALID → biz VALID (override). Şu an
+        //      yalnızca TYPE_URI_VARIANT için. sigInfo.appliedSuppressions'a yazılır.
+        //   2) REJECTION:  DSS INVALID → biz de INVALID (destek), ama
+        //      "neden" sorusuna Türkiye-spesifik tanı koduyla cevap veririz.
+        //      MISSING_SP_REFERENCE için. sigInfo.appliedRejections'a yazılır;
+        //      verdict değişmez.
+        // Gate ve detector tek bir noktada çalışır; sonuç (anomaly) iki
+        // değerlendirici metoda da aynı obje olarak geçer — XML byte'ları
+        // ikinci kez parse edilmez.
         SignatureWrapper signatureWrapper = diagnosticData.getSignatureById(signatureId);
-        AppliedSuppression trSuppression = evaluateTrLegacyXadesTolerance(
-                signatureId, indication, subIndication, signatureWrapper,
-                detailedReport, originalXmlBytes);
+        LegacyTurkishXadesAnomaly trAnomaly = null;
+        if (matchesTrLegacyXadesGate(indication, subIndication, signatureWrapper,
+                detailedReport, signatureId, originalXmlBytes)) {
+            trAnomaly = legacyTrXadesDetector.detectAnomaly(originalXmlBytes);
+        }
+
+        AppliedSuppression trSuppression =
+                (trAnomaly != null && trAnomaly.getKind() == LegacyTurkishXadesAnomaly.Kind.TYPE_URI_VARIANT)
+                        ? evaluateTrLegacyXadesTolerance(
+                                signatureId, indication, subIndication, trAnomaly)
+                        : null;
+        AppliedRejection trRejection =
+                (trSuppression == null
+                        && trAnomaly != null
+                        && trAnomaly.getKind() == LegacyTurkishXadesAnomaly.Kind.MISSING_SP_REFERENCE)
+                        ? evaluateTrLegacyXadesRejection(
+                                signatureId, indication, subIndication, trAnomaly)
+                        : null;
         boolean trToleranceApplied = trSuppression != null;
+        boolean trRejectionApplied = trRejection != null;
 
         if (trToleranceApplied) {
             // İmzayı PASSED'a yükselttik. SubIndication artık anlamsız —
@@ -574,6 +598,12 @@ public class AdvancedSignatureVerificationService {
                     new ArrayList<>(java.util.Collections.singletonList(trSuppression)));
             indication = Indication.TOTAL_PASSED;
             subIndication = null;
+        } else if (trRejectionApplied) {
+            // Verdict'i değiştirmiyoruz; sadece neden reddedildiğini Mersel
+            // tanı koduyla zenginleştiriyoruz. DSS'in INDETERMINATE/SIG_CONSTRAINTS_FAILURE
+            // çıktısı korunur.
+            sigInfo.setAppliedRejections(
+                    new ArrayList<>(java.util.Collections.singletonList(trRejection)));
         }
 
         boolean isValid = indication == Indication.TOTAL_PASSED || indication == Indication.PASSED;
@@ -620,7 +650,7 @@ public class AdvancedSignatureVerificationService {
 
         // Hatalar ve uyarılar
         collectErrorsAndWarnings(sigInfo, simpleReport, detailedReport, signatureId,
-                trToleranceApplied);
+                trToleranceApplied, trSuppression, trRejection);
 
         // STRICT VALIDATION: Kritik hata varsa geçersiz say. Tolerance varken
         // collectErrorsAndWarnings hata yerine warning ekler, dolayısıyla bu
@@ -650,65 +680,38 @@ public class AdvancedSignatureVerificationService {
     }
 
     /**
-     * KamuSM / GİB üreticisinin XAdES <code>Reference Type</code> URI yazım
-     * hatasını tespit edip imzanın geçerli sayılıp sayılamayacağını
-     * değerlendirir.
+     * KamuSM / GİB üreticilerinin XAdES Type URI yazım hatasını
+     * <strong>suppression</strong> yoluyla işler: kriptografi sağlam ve
+     * tek FAIL <code>BBB_SAV_ISQPMDOSPP</code> ise DSS'in INVALID verdict'i
+     * VALID'e yükseltilir; üretici Type URI'si audit kanalına yazılır.
      *
-     * <p><b>Tolerans tüm şu koşullar sağlandığında devreye girer:</b></p>
-     * <ol>
-     *   <li>Operatör tolerance'ı kapatmamış
-     *       (<code>verification.tr-legacy-xades-tolerance-enabled=true</code>).</li>
-     *   <li>DSS indication = INDETERMINATE.</li>
-     *   <li>DSS subIndication = SIG_CONSTRAINTS_FAILURE.</li>
-     *   <li>DSS DiagnosticData'da imza kriptografik olarak sağlam:
-     *       <code>signatureIntact && signatureValid</code>.</li>
-     *   <li>BBB SAV içinde <em>tek</em> FAIL'lı constraint
-     *       <code>BBB_SAV_ISQPMDOSPP</code> — başka SAV constraint'i de
-     *       FAIL ediyorsa imza gerçekten kırıktır, ELLEMEYİZ.</li>
-     *   <li>Orijinal XML byte'larında detector,
-     *       <code>01903 .* XAdES.xsd .* #SignedProperties</code> paterniyle
-     *       eşleşen Type URI buluyor.</li>
-     * </ol>
+     * <p>Çağırıcı (processSignature) bu noktada
+     * {@link #matchesTrLegacyXadesGate} kontrolünü geçmiş ve detector'dan
+     * {@link LegacyTurkishXadesAnomaly.Kind#TYPE_URI_VARIANT} anomaly'sini
+     * çıkarmış olmalıdır; bu metod sadece config flag'i kontrol edip
+     * suppression objesini üretir.</p>
      *
+     * @param anomaly çağırıcı tarafından tespit edilmiş Type URI varyantı
+     *                (kind = TYPE_URI_VARIANT garantili).
      * @return tolerans uygulanacaksa audit kanalına yazılacak
-     *         {@link AppliedSuppression} objesi; aksi halde <code>null</code>
+     *         {@link AppliedSuppression}; flag kapalıysa <code>null</code>
      *         (DSS kararı aynen kullanılmalı).
      */
     private AppliedSuppression evaluateTrLegacyXadesTolerance(
             String signatureId,
             Indication indication,
             SubIndication subIndication,
-            SignatureWrapper signatureWrapper,
-            DetailedReport detailedReport,
-            byte[] originalXmlBytes) {
+            LegacyTurkishXadesAnomaly anomaly) {
 
         if (!config.isTrLegacyXadesToleranceEnabled()) {
+            logger.debug("TR XAdES Type URI patolojisi tespit edildi ama tolerance "
+                    + "kapalı (signatureId={}); DSS kararı korunuyor.", signatureId);
             return null;
         }
-        if (indication != Indication.INDETERMINATE) {
-            return null;
-        }
-        if (subIndication != SubIndication.SIG_CONSTRAINTS_FAILURE) {
-            return null;
-        }
-        if (signatureWrapper == null) {
-            return null;
-        }
-        if (!signatureWrapper.isSignatureIntact() || !signatureWrapper.isSignatureValid()) {
-            return null;
-        }
-        if (!isOnlyBbbSavFailureMessageDigestOrSignedProperties(detailedReport, signatureId)) {
-            return null;
-        }
-        if (originalXmlBytes == null || legacyTrXadesDetector == null) {
-            return null;
-        }
-        String hit = legacyTrXadesDetector.detect(originalXmlBytes);
-        if (hit == null) {
-            return null;
-        }
-        logger.info("TR legacy XAdES toleransı uygulandı (signatureId={}, code={}). DSS "
-                        + "INDETERMINATE/SIG_CONSTRAINTS_FAILURE iken imza kriptografik "
+
+        String hit = anomaly.getEvidence();
+        logger.info("TR legacy XAdES toleransı uygulandı (signatureId={}, code={}, kind=TYPE_URI_VARIANT). "
+                        + "DSS INDETERMINATE/SIG_CONSTRAINTS_FAILURE iken imza kriptografik "
                         + "olarak sağlam ve tek hata BBB_SAV_ISQPMDOSPP. Üretici Type URI: '{}'",
                 signatureId, SuppressionCode.MDSS_XADES_LEGACY_TR_TYPE_URI.getCode(), hit);
 
@@ -727,6 +730,121 @@ public class AdvancedSignatureVerificationService {
                 subIndication.name(),
                 evidence,
                 sc.getDocsUrl());
+    }
+
+    /**
+     * XAdES tek-referanslı imza patolojisi için <strong>rejection
+     * enrichment</strong>: DSS'in INVALID verdict'i aynen korunur, "neden
+     * invalid" sorusuna Mersel'e özel kataloglu tanı koduyla cevap verilir.
+     *
+     * <p>Bu varyantta ikinci <code>&lt;ds:Reference&gt;</code> hiç
+     * üretilmediği için <code>SignedProperties</code> (içindeki
+     * <code>SigningTime</code>, <code>SigningCertificate</code> digest,
+     * <code>SignaturePolicyIdentifier</code> vs.) imza kapsamı dışında
+     * kalır; bu alanlar post-signing modifiye edilebilir ve imza yine
+     * matematik olarak doğrulanır. Yapısal hata imzayı üreten yazılımda;
+     * iki referans (biri body, biri SignedProperties) üretilmelidir.
+     * Verdict her zaman INVALID; rejection objesi yalnızca tanı kanalıdır
+     * — operatör hangi spesifik patolojinin tetiklediğini Mersel kodundan
+     * teşhis eder.</p>
+     *
+     * <p>Çağırıcı (processSignature) bu noktada
+     * {@link #matchesTrLegacyXadesGate} kontrolünü geçmiş ve detector'dan
+     * {@link LegacyTurkishXadesAnomaly.Kind#MISSING_SP_REFERENCE}
+     * anomaly'sini çıkarmış olmalıdır.</p>
+     *
+     * <p>Config gate: {@code verification.tr-legacy-xades-rejection-enrichment-enabled}.
+     * Default açık; kapalıyken patoloji tespit edilse bile rejection
+     * objesi üretilmez ve DSS'in jenerik SIG_CONSTRAINTS_FAILURE'ı tek
+     * başına raporlanır.</p>
+     *
+     * @return rejection uygulanacaksa audit kanalına yazılacak
+     *         {@link AppliedRejection}; flag kapalıysa <code>null</code>.
+     */
+    private AppliedRejection evaluateTrLegacyXadesRejection(
+            String signatureId,
+            Indication indication,
+            SubIndication subIndication,
+            LegacyTurkishXadesAnomaly anomaly) {
+
+        if (!config.isTrLegacyXadesRejectionEnrichmentEnabled()) {
+            logger.debug("TR XAdES missing-SP-reference patolojisi tespit edildi ama "
+                    + "rejection enrichment kapalı (signatureId={}); DSS'in jenerik "
+                    + "SIG_CONSTRAINTS_FAILURE'ı tek başına raporlanacak.", signatureId);
+            return null;
+        }
+
+        String signedPropertiesId = anomaly.getEvidence();
+        RejectionCode rc = RejectionCode.MDSS_XADES_LEGACY_TR_MISSING_SP_REFERENCE;
+
+        logger.warn("TR legacy XAdES rejection raporlandı (signatureId={}, code={}). "
+                        + "DSS INDETERMINATE/SIG_CONSTRAINTS_FAILURE; imza kriptografik "
+                        + "olarak sağlam fakat SignedProperties Id='{}' hiçbir Reference "
+                        + "tarafından bağlanmamış. İmza reddedildi; SigningTime ve "
+                        + "SigningCertificate kriptografik olarak korunmuyor.",
+                signatureId, rc.getCode(), signedPropertiesId);
+
+        java.util.Map<String, Object> evidence = new java.util.LinkedHashMap<>();
+        evidence.put("signedPropertiesId", signedPropertiesId);
+        evidence.put("dssBbbConstraint", BBB_SAV_ISQPMDOSPP_KEY);
+        evidence.put("missingProtection",
+                "SigningTime, SigningCertificateV2, SignaturePolicyIdentifier, "
+                        + "SignerRole, CommitmentTypeIndication");
+        evidence.put("standardReference", "ETSI EN 319 132-1 (XAdES-BES)");
+        evidence.put("remediation",
+                "İmzayı üreten yazılım iki ds:Reference üretmelidir: biri "
+                        + "URI=\"\" (belge body'si, enveloped-signature transform), "
+                        + "diğeri URI=\"#<SignedPropertiesId>\" "
+                        + "Type=\"http://uri.etsi.org/01903#SignedProperties\" "
+                        + "(qualifying properties).");
+
+        return new AppliedRejection(
+                rc.getCode(),
+                rc.getTitle(),
+                rc.getDefaultReason() + " SignedProperties Id: \"" + signedPropertiesId + "\".",
+                rc.getSeverity(),
+                indication.name(),
+                subIndication.name(),
+                evidence,
+                rc.getDocsUrl());
+    }
+
+    /**
+     * TR-özel XAdES patoloji değerlendirmesi için ortak ön-koşullar.
+     * Hem {@link #evaluateTrLegacyXadesTolerance} hem
+     * {@link #evaluateTrLegacyXadesRejection} bu gate'i geçmek zorunda;
+     * tek noktada toplu tutmak iki yolu birbirine paralel kılar
+     * (tanı koşulları kayar/uyumsuz kalmaz).
+     *
+     * @return tüm ön-koşullar sağlanırsa <code>true</code>; aksi halde
+     *         <code>false</code> ve çağıran <code>null</code> dönmelidir.
+     */
+    private boolean matchesTrLegacyXadesGate(
+            Indication indication,
+            SubIndication subIndication,
+            SignatureWrapper signatureWrapper,
+            DetailedReport detailedReport,
+            String signatureId,
+            byte[] originalXmlBytes) {
+        if (indication != Indication.INDETERMINATE) {
+            return false;
+        }
+        if (subIndication != SubIndication.SIG_CONSTRAINTS_FAILURE) {
+            return false;
+        }
+        if (signatureWrapper == null) {
+            return false;
+        }
+        if (!signatureWrapper.isSignatureIntact() || !signatureWrapper.isSignatureValid()) {
+            return false;
+        }
+        if (!isOnlyBbbSavFailureMessageDigestOrSignedProperties(detailedReport, signatureId)) {
+            return false;
+        }
+        if (originalXmlBytes == null || legacyTrXadesDetector == null) {
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -997,18 +1115,27 @@ public class AdvancedSignatureVerificationService {
     /**
      * Hataları ve uyarıları toplar.
      *
-     * @param trToleranceApplied TR-özel XAdES Type URI tolerance bu imzaya
+     * @param trToleranceApplied TR-özel XAdES <em>suppression</em> bu imzaya
      *        uygulandıysa <code>true</code>. Bu durumda DSS'in raporladığı
      *        SIG_CONSTRAINTS_FAILURE artık <em>hata</em> değil, açıklayıcı bir
      *        uyarıdır — istemciyi yanıltmamak için validationErrors yerine
      *        validationWarnings'e taşırız.
+     * @param trSuppression uygulanan suppression objesi (null olabilir).
+     *        Warning metnindeki kod değerini bastırmak için.
+     * @param trRejection uygulanan rejection objesi (null olabilir). Verdict
+     *        değişmez; validationErrors içine kataloglu Mersel rejection
+     *        koduyla zenginleştirilmiş satır eklenir (operatör DSS jenerik
+     *        SIG_CONSTRAINTS_FAILURE'ından öte Türkiye-spesifik patolojiyi
+     *        tek bakışta görsün).
      */
     private void collectErrorsAndWarnings(
             SignatureInfo sigInfo,
             SimpleReport simpleReport,
             DetailedReport detailedReport,
             String signatureId,
-            boolean trToleranceApplied) {
+            boolean trToleranceApplied,
+            AppliedSuppression trSuppression,
+            AppliedRejection trRejection) {
 
         List<String> errors = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
@@ -1026,25 +1153,41 @@ public class AdvancedSignatureVerificationService {
             errors.add(errorMsg);
         }
 
+        // TR-özel rejection devrede mi? Verdict değişmez, ama DSS'in jenerik
+        // SubIndication mesajının yanına Mersel kataloglu tanı kodunu da
+        // ekliyoruz ki operatör log/grep ile hızlıca filtreleyebilsin.
+        if (trRejection != null && trRejection.getCode() != null) {
+            errors.add("[" + trRejection.getCode() + "] " + trRejection.getReason());
+        }
+
         // SubIndication kontrolü
         SubIndication subIndication = simpleReport.getSubIndication(signatureId);
         if (subIndication != null) {
             if (trToleranceApplied && subIndication == SubIndication.SIG_CONSTRAINTS_FAILURE) {
-                // TR-özel tolerans devrede: DSS'in SIG_CONSTRAINTS_FAILURE'ı
-                // jenerik bir kriptografik hata değil, sadece XAdES Type URI
-                // yazım hatası kaynaklı. Operatör/istemci için anlaşılır
+                // TR-özel suppression devrede: DSS'in SIG_CONSTRAINTS_FAILURE'ı
+                // jenerik bir kriptografik hata değil, KamuSM/GİB üreticisinin
+                // yapısal Type URI varyantı. Operatör/istemci için anlaşılır
                 // bir uyarıya çevir; tam audit detayı sigInfo.appliedSuppressions
-                // altında. Kodu warning metnine de ekliyoruz ki operatör
-                // log/grep ile hızlıca tarayabilsin.
-                warnings.add("[" + SuppressionCode.MDSS_XADES_LEGACY_TR_TYPE_URI.getCode()
-                        + "] İmza, KamuSM/GİB ekosistemine özgü XAdES "
+                // altında.
+                String code = trSuppression != null && trSuppression.getCode() != null
+                        ? trSuppression.getCode()
+                        : SuppressionCode.MDSS_XADES_LEGACY_TR_TYPE_URI.getCode();
+                String detail = "İmza, KamuSM/GİB ekosistemine özgü XAdES "
                         + "SignedProperties Type URI yazım hatası içeriyor "
                         + "(\"…/v1.3.2/XAdES.xsd#SignedProperties\"). "
-                        + "Kriptografik bütünlük doğrulandı; tolerans uygulandı.");
+                        + "Kriptografik bütünlük doğrulandı; tolerans uygulandı.";
+                warnings.add("[" + code + "] " + detail);
+            } else if (trRejection != null && subIndication == SubIndication.SIG_CONSTRAINTS_FAILURE) {
+                // Rejection enrichment devrede: Mersel kataloglu satır zaten
+                // yukarıda eklendi. Jenerik "(Kritik hata)" satırını eklemek
+                // operatöre aynı sorun için ikinci bir hata satırı gösterir
+                // ve "kaç hata var?" sayımını yanıltır; bu yüzden atlanır.
+                logger.debug("SIG_CONSTRAINTS_FAILURE detail line suppressed because "
+                        + "Mersel rejection code is already in validationErrors "
+                        + "(signatureId={}, code={}).", signatureId, trRejection.getCode());
             } else {
                 String subIndicationMsg = "İmza uyarısı: " + subIndication.name();
 
-                // Kritik SubIndication'lar direkt hata olarak ele alınır
                 switch (subIndication) {
                     case FORMAT_FAILURE:
                     case HASH_FAILURE:

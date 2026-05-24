@@ -10,6 +10,7 @@ import eu.europa.esig.dss.spi.x509.revocation.crl.CRLSource;
 import eu.europa.esig.dss.spi.x509.revocation.ocsp.OCSPSource;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
+import io.mersel.dss.verify.api.services.aia.NormalizingCachingAiaDataLoader;
 import io.mersel.dss.verify.api.services.revocation.LoggingCachingCRLSource;
 import io.mersel.dss.verify.api.services.revocation.LoggingCachingOCSPSource;
 import io.mersel.dss.verify.api.services.revocation.RetryPolicy;
@@ -65,6 +66,12 @@ public class RevocationServicesConfiguration {
 
     /** CRL cache metric prefix'i — bkz. {@link #OCSP_CACHE_METRIC_NAME}. */
     static final String CRL_CACHE_METRIC_NAME = "mersel.revocation.crl";
+
+    /**
+     * AIA cache metric prefix'i — ara CA fetch cache'i. Bkz.
+     * {@link #OCSP_CACHE_METRIC_NAME}; aynı naming convention.
+     */
+    static final String AIA_CACHE_METRIC_NAME = "mersel.aia.fetch";
 
     private final VerificationConfiguration config;
 
@@ -154,9 +161,24 @@ public class RevocationServicesConfiguration {
 
     /**
      * AIA (Authority Information Access) source — sertifika zinciri eksik
-     * geldiginde ara CA sertifikasini fetch icin. {@code DefaultAIASource}
-     * kendi icinde HTTP fetcher kullanir; cache DSS tarafindan dahili
-     * yapilir, kendi wrapper'imiza ihtiyac yok.
+     * geldiginde ara CA sertifikasini fetch icin.
+     *
+     * <p>Burada {@code CommonsDataLoader}'i <strong>doğrudan</strong>
+     * {@code DefaultAIASource}'a vermeyiz; arada {@link NormalizingCachingAiaDataLoader}
+     * dekoratörü oturur. Bu dekoratör iki sorunu çözer:</p>
+     * <ul>
+     *   <li><b>Naked base64 normalize</b> — Bazı TR ESHS endpoint'leri (örnek:
+     *       Eimzatr <code>depo.e-imzatriptal.com</code>) ara CA sertifikasını
+     *       <code>Content-Type: application/pkix-cert</code> başlığı altında
+     *       <em>raw DER yerine</em> base64-encoded text olarak servis ediyor.
+     *       Java <code>CertificateFactory</code> raw DER veya PEM ister; naked
+     *       base64'ü kabul etmez ve DSS <code>NO_CERTIFICATE_CHAIN_FOUND</code>
+     *       döner. Decorator response'u DER'e normalize ederek bu üretici
+     *       bug'ını şeffafça absorbe eder.</li>
+     *   <li><b>In-memory cache</b> — KamuSM ekosisteminde ara CA sayısı düşük
+     *       (<=20); aynı URL'e tekrar gitmek HTTP yükünden ibaret. 24 saat
+     *       TTL ile aynı ara CA bir kez fetch edilir.</li>
+     * </ul>
      */
     @Bean
     @ConditionalOnProperty(
@@ -164,10 +186,21 @@ public class RevocationServicesConfiguration {
             havingValue = "true",
             matchIfMissing = true)
     public AIASource aiaSource() {
-        CommonsDataLoader dataLoader = new CommonsDataLoader();
-        applyTimeouts(dataLoader);
-        DefaultAIASource aia = new DefaultAIASource(dataLoader);
-        logger.info("AIA source bean ready");
+        CommonsDataLoader rawLoader = new CommonsDataLoader();
+        applyTimeouts(rawLoader);
+
+        NormalizingCachingAiaDataLoader normalizingLoader = new NormalizingCachingAiaDataLoader(
+                rawLoader,
+                config.getAiaCacheMaxSize(),
+                config.getAiaCacheTtlSeconds());
+
+        // Caffeine cache'i Micrometer'a bağla — observability paritesi
+        // OCSP/CRL ile aynı standartta. Bind başarısız olsa bile AIA
+        // çalışmaya devam eder (bindCacheMetrics graceful degrade eder).
+        bindCacheMetrics(AIA_CACHE_METRIC_NAME, normalizingLoader.caffeineCache());
+
+        DefaultAIASource aia = new DefaultAIASource(normalizingLoader);
+        logger.info("AIA source bean ready (normalizing + cache + metrics)");
         return aia;
     }
 

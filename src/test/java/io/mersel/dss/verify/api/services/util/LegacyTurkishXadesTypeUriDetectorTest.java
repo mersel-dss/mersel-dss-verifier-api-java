@@ -33,10 +33,13 @@ class LegacyTurkishXadesTypeUriDetectorTest {
                 + "URI=\"#SP\"/>"
                 + "</root>";
 
-        String hit = detector.detect(xml.getBytes(StandardCharsets.UTF_8));
+        LegacyTurkishXadesAnomaly anomaly =
+                detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8));
 
-        assertNotNull(hit, "Üretici hatasını (xsd varyantı) yakalamadı");
-        assertEquals("http://uri.etsi.org/01903/v1.3.2/XAdES.xsd#SignedProperties", hit);
+        assertNotNull(anomaly, "Üretici hatasını (xsd varyantı) yakalamadı");
+        assertEquals(LegacyTurkishXadesAnomaly.Kind.TYPE_URI_VARIANT, anomaly.getKind());
+        assertEquals("http://uri.etsi.org/01903/v1.3.2/XAdES.xsd#SignedProperties",
+                anomaly.getEvidence());
     }
 
     @Test
@@ -44,7 +47,7 @@ class LegacyTurkishXadesTypeUriDetectorTest {
         String xml = "<DS:REFERENCE TYPE=\"http://uri.etsi.org/01903/v1.3.2/XAdES.xsd#SignedProperties\" "
                 + "URI=\"#SP\"/>";
 
-        assertNotNull(detector.detect(xml.getBytes(StandardCharsets.UTF_8)));
+        assertNotNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
     }
 
     @Test
@@ -53,11 +56,11 @@ class LegacyTurkishXadesTypeUriDetectorTest {
         String xml = "<dsig:Reference "
                 + "Type=\"http://uri.etsi.org/01903/v1.3.2/XAdES.xsd#SignedProperties\"/>";
 
-        assertNotNull(detector.detect(xml.getBytes(StandardCharsets.UTF_8)));
+        assertNotNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
 
         String xml2 = "<Reference "
                 + "Type=\"http://uri.etsi.org/01903/v1.3.2/XAdES.xsd#SignedProperties\"/>";
-        assertNotNull(detector.detect(xml2.getBytes(StandardCharsets.UTF_8)));
+        assertNotNull(detector.detectAnomaly(xml2.getBytes(StandardCharsets.UTF_8)));
     }
 
     // -----------------------------------------------------------------------
@@ -66,19 +69,22 @@ class LegacyTurkishXadesTypeUriDetectorTest {
 
     @Test
     void detect_returnsHit_forXades132VersionedTypeUri() {
-        // Sabancı Dijital / Türkiye Sigorta envelope'larında görülen varyant.
-        // DSS XAdES 1.3.2 için versiyonsuz Type URI bekler; tool versiyon
-        // prefix'ini namespace ile karıştırıp Type'a da eklemiş.
+        // DSS XAdES 1.3.2 için versiyonsuz Type URI bekler; bazı üretici
+        // araçlar versiyon prefix'ini namespace ile karıştırıp Type'a da
+        // ekliyor.
         String xml = "<root>"
                 + "<ds:Reference Id=\"SP\" "
                 + "Type=\"http://uri.etsi.org/01903/v1.3.2#SignedProperties\" "
                 + "URI=\"#SP\"/>"
                 + "</root>";
 
-        String hit = detector.detect(xml.getBytes(StandardCharsets.UTF_8));
+        LegacyTurkishXadesAnomaly anomaly =
+                detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8));
 
-        assertNotNull(hit, "v1.3.2 versiyon-prefix varyantı yakalanmadı");
-        assertEquals("http://uri.etsi.org/01903/v1.3.2#SignedProperties", hit);
+        assertNotNull(anomaly, "v1.3.2 versiyon-prefix varyantı yakalanmadı");
+        assertEquals(LegacyTurkishXadesAnomaly.Kind.TYPE_URI_VARIANT, anomaly.getKind());
+        assertEquals("http://uri.etsi.org/01903/v1.3.2#SignedProperties",
+                anomaly.getEvidence());
     }
 
     @Test
@@ -87,10 +93,13 @@ class LegacyTurkishXadesTypeUriDetectorTest {
                 + "Type=\"http://uri.etsi.org/01903/v1.4.1#SignedProperties\" "
                 + "URI=\"#SP\"/>";
 
-        String hit = detector.detect(xml.getBytes(StandardCharsets.UTF_8));
+        LegacyTurkishXadesAnomaly anomaly =
+                detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8));
 
-        assertNotNull(hit, "v1.4.1 versiyon-prefix varyantı yakalanmadı");
-        assertEquals("http://uri.etsi.org/01903/v1.4.1#SignedProperties", hit);
+        assertNotNull(anomaly, "v1.4.1 versiyon-prefix varyantı yakalanmadı");
+        assertEquals(LegacyTurkishXadesAnomaly.Kind.TYPE_URI_VARIANT, anomaly.getKind());
+        assertEquals("http://uri.etsi.org/01903/v1.4.1#SignedProperties",
+                anomaly.getEvidence());
     }
 
     @Test
@@ -99,7 +108,7 @@ class LegacyTurkishXadesTypeUriDetectorTest {
                 + "TYPE=\"http://uri.etsi.org/01903/v1.3.2#SignedProperties\" "
                 + "URI=\"#SP\"/>";
 
-        assertNotNull(detector.detect(xml.getBytes(StandardCharsets.UTF_8)));
+        assertNotNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
     }
 
     @Test
@@ -108,7 +117,7 @@ class LegacyTurkishXadesTypeUriDetectorTest {
                 + "Type=\"https://uri.etsi.org/01903/v1.3.2#SignedProperties\" "
                 + "URI=\"#SP\"/>";
 
-        assertNotNull(detector.detect(xml.getBytes(StandardCharsets.UTF_8)));
+        assertNotNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
     }
 
     // -----------------------------------------------------------------------
@@ -122,7 +131,7 @@ class LegacyTurkishXadesTypeUriDetectorTest {
         String xml = "<ds:Reference "
                 + "Type=\"http://uri.etsi.org/01903#SignedProperties\" URI=\"#SP\"/>";
 
-        assertNull(detector.detect(xml.getBytes(StandardCharsets.UTF_8)),
+        assertNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)),
                 "Standart Type URI'sini yanlışlıkla flag'ledi");
     }
 
@@ -133,7 +142,7 @@ class LegacyTurkishXadesTypeUriDetectorTest {
         String xml = "<ds:Reference "
                 + "Type=\"http://uri.etsi.org/01903/v1.1.1#SignedProperties\" URI=\"#SP\"/>";
 
-        assertNull(detector.detect(xml.getBytes(StandardCharsets.UTF_8)));
+        assertNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
     }
 
     @Test
@@ -142,20 +151,20 @@ class LegacyTurkishXadesTypeUriDetectorTest {
         String xml = "<ds:Reference "
                 + "Type=\"http://uri.etsi.org/01903/v1.2.2#SignedProperties\" URI=\"#SP\"/>";
 
-        assertNull(detector.detect(xml.getBytes(StandardCharsets.UTF_8)));
+        assertNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
     }
 
     @Test
     void detect_returnsNull_whenXmlEmpty() {
-        assertNull(detector.detect(null));
-        assertNull(detector.detect(new byte[0]));
+        assertNull(detector.detectAnomaly(null));
+        assertNull(detector.detectAnomaly(new byte[0]));
     }
 
     @Test
     void detect_returnsNull_whenNoEtsi01903AtAll() {
         String xml = "<root><ds:Reference Type=\"#Foo\"/></root>";
 
-        assertNull(detector.detect(xml.getBytes(StandardCharsets.UTF_8)));
+        assertNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
     }
 
     @Test
@@ -166,7 +175,7 @@ class LegacyTurkishXadesTypeUriDetectorTest {
                 + "<ds:Reference Type=\"http://uri.etsi.org/01903#SignedProperties\"/>"
                 + "</root>";
 
-        assertNull(detector.detect(xml.getBytes(StandardCharsets.UTF_8)));
+        assertNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
     }
 
     @Test
@@ -176,7 +185,7 @@ class LegacyTurkishXadesTypeUriDetectorTest {
         String xml = "<ds:Reference "
                 + "Type=\"http://uri.etsi.org/01903/XAdES.xsd#OtherElement\"/>";
 
-        assertNull(detector.detect(xml.getBytes(StandardCharsets.UTF_8)));
+        assertNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
     }
 
     @Test
@@ -187,7 +196,7 @@ class LegacyTurkishXadesTypeUriDetectorTest {
         String xml = "<ds:Reference "
                 + "Type=\"http://uri.etsi.org/01903/v1.5.0#SignedProperties\"/>";
 
-        assertNull(detector.detect(xml.getBytes(StandardCharsets.UTF_8)));
+        assertNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
     }
 
     @Test
@@ -196,17 +205,16 @@ class LegacyTurkishXadesTypeUriDetectorTest {
         // olabilir (faturalar). ISO-8859-1 byte-perfect roundtrip garantisi var.
         StringBuilder sb = new StringBuilder()
                 .append("<root>")
-                .append("<note>İmza geçerli — şirket bilgisi: AXA SİGORTA</note>")
+                .append("<note>İmza geçerli — Türkçe karakterler: çğıöşü</note>")
                 .append("<ds:Reference Type=\"http://uri.etsi.org/01903/v1.3.2/XAdES.xsd#SignedProperties\"/>")
                 .append("</root>");
         byte[] bytes = sb.toString().getBytes(StandardCharsets.UTF_8);
 
-        assertNotNull(detector.detect(bytes));
+        assertNotNull(detector.detectAnomaly(bytes));
     }
 
     @Test
     void detect_handlesVersionedPatternInsideRealUblEnvelope() {
-        // Sabancı / Türkiye Sigorta envelope'unun gerçek dünya minimal repro'su:
         // UBL ApplicationResponse içinde XAdES Signature, Type attribute'u
         // versiyon-prefix yazım hatasıyla. ETSI sniff marker'ı ("01903")
         // namespace declaration'da da geçiyor — bu negatif filtreyi
@@ -219,9 +227,198 @@ class LegacyTurkishXadesTypeUriDetectorTest {
                 + "</ds:Signature>"
                 + "</ApplicationResponse>";
 
-        String hit = detector.detect(xml.getBytes(StandardCharsets.UTF_8));
+        LegacyTurkishXadesAnomaly anomaly =
+                detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8));
 
-        assertNotNull(hit);
-        assertEquals("http://uri.etsi.org/01903/v1.3.2#SignedProperties", hit);
+        assertNotNull(anomaly);
+        assertEquals(LegacyTurkishXadesAnomaly.Kind.TYPE_URI_VARIANT, anomaly.getKind());
+        assertEquals("http://uri.etsi.org/01903/v1.3.2#SignedProperties",
+                anomaly.getEvidence());
+    }
+
+    // -----------------------------------------------------------------------
+    // P3 — SignedProperties referansı eksik (tek referanslı XAdES imza)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Tek referanslı XAdES imza repro'su: tek <code>ds:Reference URI=""</code>
+     * (enveloped-signature transform), SignedProperties Object altında var
+     * ama referans yok. ETSI namespace declaration'ı sniff marker'ı tetikler;
+     * detectAnomaly'nin MISSING_SP_REFERENCE dönmesi beklenir.
+     */
+    @Test
+    void detectAnomaly_returnsMissingSpReference_whenOnlyOneReferenceAndSignedPropertiesUnlinked() {
+        String xml = "<Invoice xmlns:xades=\"http://uri.etsi.org/01903/v1.3.2#\">"
+                + "<ds:Signature Id=\"Sig-1\">"
+                + "<ds:SignedInfo>"
+                + "<ds:Reference Id=\"All-Ref\" URI=\"\">"
+                + "<ds:Transforms><ds:Transform Algorithm=\"http://www.w3.org/2000/09/xmldsig#enveloped-signature\"/></ds:Transforms>"
+                + "<ds:DigestValue>aaa</ds:DigestValue>"
+                + "</ds:Reference>"
+                + "</ds:SignedInfo>"
+                + "<ds:Object>"
+                + "<xades:QualifyingProperties>"
+                + "<xades:SignedProperties Id=\"SignedProperties_Sig-1\">"
+                + "<xades:SignedSignatureProperties><xades:SigningTime>2026-05-18T16:16:43+03:00</xades:SigningTime></xades:SignedSignatureProperties>"
+                + "</xades:SignedProperties>"
+                + "</xades:QualifyingProperties>"
+                + "</ds:Object>"
+                + "</ds:Signature>"
+                + "</Invoice>";
+
+        LegacyTurkishXadesAnomaly anomaly =
+                detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8));
+
+        assertNotNull(anomaly, "missing-SP-reference varyantı yakalanmadı");
+        assertEquals(LegacyTurkishXadesAnomaly.Kind.MISSING_SP_REFERENCE, anomaly.getKind());
+        assertEquals("SignedProperties_Sig-1", anomaly.getEvidence());
+    }
+
+    @Test
+    void detectAnomaly_returnsNull_whenSpReferencedByUriFragment() {
+        // Standart XAdES: Reference URI="#SP-1" SignedProperties Id="SP-1"
+        // → DSS zaten kabul eder, BBB_SAV_ISQPMDOSPP oluşmaz; detector
+        // hiçbir patoloji raporlamamalı.
+        String xml = "<root xmlns:xades=\"http://uri.etsi.org/01903/v1.3.2#\">"
+                + "<ds:Reference URI=\"#SP-1\" Type=\"http://uri.etsi.org/01903#SignedProperties\"/>"
+                + "<ds:Reference URI=\"\"/>"
+                + "<xades:SignedProperties Id=\"SP-1\"/>"
+                + "</root>";
+
+        assertNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test
+    void detectAnomaly_returnsNull_whenSpReferencedByTypeOnlyEvenWithoutUriFragment() {
+        // Birisi SignedProperties'i URI yerine sadece Type ile referans
+        // ediyorsa (teknik olarak geçersiz ama olsun), P3 değil — Type URI
+        // ZATEN "/01903.*#SignedProperties" formatında, dolayısıyla
+        // ANY_SIGNED_PROPERTIES_TYPE_REFERENCE_PATTERN bunu yakalar ve
+        // missing-SP-reference iddiası geçersiz olur.
+        String xml = "<root xmlns:xades=\"http://uri.etsi.org/01903/v1.3.2#\">"
+                + "<ds:Reference Type=\"http://uri.etsi.org/01903#SignedProperties\"/>"
+                + "<xades:SignedProperties Id=\"SP-X\"/>"
+                + "</root>";
+
+        assertNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test
+    void detectAnomaly_typeUriVariantWinsOverMissingSpReference() {
+        // İmza hem Type URI yazım hatalı hem de "referans yok" gibi
+        // görünüyorsa, detector P1/P2'yi ÖNCE raporlamalı — daha spesifik
+        // patoloji.
+        String xml = "<root xmlns:xades=\"http://uri.etsi.org/01903/v1.3.2#\">"
+                + "<ds:Reference URI=\"#X\" "
+                + "Type=\"http://uri.etsi.org/01903/v1.3.2/XAdES.xsd#SignedProperties\"/>"
+                + "<xades:SignedProperties Id=\"SP-Other\"/>"
+                + "</root>";
+
+        LegacyTurkishXadesAnomaly anomaly =
+                detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8));
+
+        assertNotNull(anomaly);
+        assertEquals(LegacyTurkishXadesAnomaly.Kind.TYPE_URI_VARIANT, anomaly.getKind());
+    }
+
+    @Test
+    void detectAnomaly_returnsNull_whenNoSignedPropertiesElement() {
+        // Plain XMLDSig (XAdES yok) — SignedProperties zaten yok, P3
+        // tetiklenmemeli. ETSI sniff marker'ı yok da olabilir.
+        String xml = "<root><ds:Reference URI=\"\"/></root>";
+
+        assertNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test
+    void detectAnomaly_handlesPrefixlessSignedPropertiesElement() {
+        // Bazı imza üreticileri default namespace kullanır (prefix-yok).
+        // SignedProperties Id'si hala yakalanabilmeli.
+        String xml = "<root xmlns=\"http://uri.etsi.org/01903/v1.3.2#\">"
+                + "<Signature><SignedInfo><Reference URI=\"\"/></SignedInfo>"
+                + "<Object><SignedProperties Id=\"NoPrefixSP\"/></Object></Signature>"
+                + "</root>";
+
+        LegacyTurkishXadesAnomaly anomaly =
+                detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8));
+
+        assertNotNull(anomaly);
+        assertEquals(LegacyTurkishXadesAnomaly.Kind.MISSING_SP_REFERENCE, anomaly.getKind());
+        assertEquals("NoPrefixSP", anomaly.getEvidence());
+    }
+
+    @Test
+    void detectAnomaly_returnsNull_whenMultipleSignedPropertiesAllReferenced() {
+        // Multi-signature senaryosu: iki ayrı SignedProperties var ve
+        // ikisi de URI fragment ile referansta. P3 patolojisi yok.
+        String xml = "<root xmlns:xades=\"http://uri.etsi.org/01903/v1.3.2#\">"
+                + "<ds:Reference URI=\"#SP-A\" Type=\"http://uri.etsi.org/01903#SignedProperties\"/>"
+                + "<ds:Reference URI=\"#SP-B\" Type=\"http://uri.etsi.org/01903#SignedProperties\"/>"
+                + "<xades:SignedProperties Id=\"SP-A\"/>"
+                + "<xades:SignedProperties Id=\"SP-B\"/>"
+                + "</root>";
+
+        assertNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test
+    void detectAnomaly_flagsUnreferencedSp_inMixedMultiSignatureScenario() {
+        // İki imza: A'nın SP'si URI fragment ile bağlı (doğru), B'nin SP'si
+        // hiçbir referansta yok (P3 patolojisi). Önceki tek-pass mantık
+        // A'daki Type=SignedProperties Reference'ından dolayı B'yi
+        // kaçırıyordu; yeni per-Id mantık B'yi yakalamalı.
+        String xml = "<root xmlns:xades=\"http://uri.etsi.org/01903/v1.3.2#\">"
+                + "<ds:Signature Id=\"Sig-A\">"
+                + "<ds:Reference URI=\"\"/>"
+                + "<ds:Reference URI=\"#SP-A\" Type=\"http://uri.etsi.org/01903#SignedProperties\"/>"
+                + "<ds:Object><xades:SignedProperties Id=\"SP-A\"/></ds:Object>"
+                + "</ds:Signature>"
+                + "<ds:Signature Id=\"Sig-B\">"
+                + "<ds:Reference URI=\"\"/>"
+                + "<ds:Object><xades:SignedProperties Id=\"SP-B\"/></ds:Object>"
+                + "</ds:Signature>"
+                + "</root>";
+
+        LegacyTurkishXadesAnomaly anomaly =
+                detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8));
+
+        assertNotNull(anomaly, "Mixed multi-sig'te referanssız SP yakalanmadı");
+        assertEquals(LegacyTurkishXadesAnomaly.Kind.MISSING_SP_REFERENCE, anomaly.getKind());
+        assertEquals("SP-B", anomaly.getEvidence());
+    }
+
+    @Test
+    void detectAnomaly_returnsNull_whenAllSpsReferencedDespiteExtraTypeOnlyReference() {
+        // Multi-sig: SP-A ve SP-B'nin ikisi de URI fragment ile bağlı,
+        // ayrıca bir adet Type-only Reference daha var (URI'siz). Type-only
+        // Reference hangi SP'ye işaret ettiği belirsiz; ama URI fragment'lar
+        // zaten tüm SP'leri kapsadığı için P3 patolojisi yok.
+        String xml = "<root xmlns:xades=\"http://uri.etsi.org/01903/v1.3.2#\">"
+                + "<ds:Reference URI=\"#SP-A\" Type=\"http://uri.etsi.org/01903#SignedProperties\"/>"
+                + "<ds:Reference URI=\"#SP-B\" Type=\"http://uri.etsi.org/01903#SignedProperties\"/>"
+                + "<ds:Reference Type=\"http://uri.etsi.org/01903#SignedProperties\"/>"
+                + "<xades:SignedProperties Id=\"SP-A\"/>"
+                + "<xades:SignedProperties Id=\"SP-B\"/>"
+                + "</root>";
+
+        assertNull(detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test
+    void detectAnomaly_flagsFirstUnreferencedSp_whenBothMissingInMultiSig() {
+        // Multi-sig'te iki SP de URI fragment'ında değil → ilk eşleşmeyen
+        // (XML doc-order'da) flag edilir.
+        String xml = "<root xmlns:xades=\"http://uri.etsi.org/01903/v1.3.2#\">"
+                + "<ds:Reference URI=\"\"/>"
+                + "<xades:SignedProperties Id=\"SP-First\"/>"
+                + "<xades:SignedProperties Id=\"SP-Second\"/>"
+                + "</root>";
+
+        LegacyTurkishXadesAnomaly anomaly =
+                detector.detectAnomaly(xml.getBytes(StandardCharsets.UTF_8));
+
+        assertNotNull(anomaly);
+        assertEquals(LegacyTurkishXadesAnomaly.Kind.MISSING_SP_REFERENCE, anomaly.getKind());
+        assertEquals("SP-First", anomaly.getEvidence());
     }
 }

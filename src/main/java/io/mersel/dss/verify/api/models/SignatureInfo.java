@@ -78,6 +78,27 @@ public class SignatureInfo {
      */
     private List<AppliedSuppression> appliedSuppressions;
 
+    /**
+     * Mersel DSS Verifier'ın bu imzayı reddederken <em>DSS'in soyut
+     * <code>SubIndication</code>'ına ek olarak</em> Türkiye ekosistemine
+     * özgü tanı kodlarıyla zenginleştirdiği gerekçeler. Boş veya null ise:
+     * DSS'in jenerik subIndication'ı tek başına yeterli kabul edildi, ek
+     * Türkiye-spesifik bir patoloji tespit edilmedi.
+     *
+     * <p>{@link #appliedSuppressions} ile karşılaştırması: orada DSS
+     * kararını override ederiz (INVALID → VALID); burada DSS kararını
+     * destekleriz (INVALID → INVALID) ama "neden" sorusuna kataloglu kod
+     * + kanıt + dokümantasyon ile cevap veririz.</p>
+     *
+     * <p>İmzanın <code>valid</code> alanı bu liste dolu olsa bile
+     * <code>false</code> kalır — rejection'lar verdict'i değiştirmez,
+     * tanılayıcı zenginleştirir.</p>
+     *
+     * @see AppliedRejection
+     * @see io.mersel.dss.verify.api.models.enums.RejectionCode
+     */
+    private List<AppliedRejection> appliedRejections;
+
     // Getters and Setters
     public String getSignatureId() {
         return signatureId;
@@ -253,6 +274,14 @@ public class SignatureInfo {
 
     public void setAppliedSuppressions(List<AppliedSuppression> appliedSuppressions) {
         this.appliedSuppressions = appliedSuppressions;
+    }
+
+    public List<AppliedRejection> getAppliedRejections() {
+        return appliedRejections;
+    }
+
+    public void setAppliedRejections(List<AppliedRejection> appliedRejections) {
+        this.appliedRejections = appliedRejections;
     }
 }
 
