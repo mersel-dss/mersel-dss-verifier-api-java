@@ -1,6 +1,7 @@
 package io.mersel.dss.verify.api.models;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.mersel.dss.verify.api.models.enums.ChainRevocationStatus;
 import io.mersel.dss.verify.api.models.enums.SignaturePackaging;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -66,5 +67,50 @@ class SignatureInfoTest {
 
         assertFalse(json.contains("signaturePackaging"),
                 "Paketleme null'sa JSON'a basılmamalı: " + json);
+    }
+
+    @Test
+    @DisplayName("chainRevocationStatus set/get round-trip")
+    void chainRevocationStatus_setterGetterRoundTrip() {
+        SignatureInfo info = new SignatureInfo();
+
+        info.setChainRevocationStatus(ChainRevocationStatus.ALL_GOOD);
+        assertEquals(ChainRevocationStatus.ALL_GOOD, info.getChainRevocationStatus());
+
+        info.setChainRevocationStatus(ChainRevocationStatus.LEAF_REVOKED);
+        assertEquals(ChainRevocationStatus.LEAF_REVOKED, info.getChainRevocationStatus());
+    }
+
+    @Test
+    @DisplayName("chainRevocationStatus default'ta null")
+    void chainRevocationStatus_isNullByDefault() {
+        SignatureInfo info = new SignatureInfo();
+
+        assertNull(info.getChainRevocationStatus());
+    }
+
+    @Test
+    @DisplayName("JSON: chainRevocationStatus set ise enum adiyla yazilir")
+    void jsonSerialization_writesChainStatusEnumName() throws Exception {
+        SignatureInfo info = new SignatureInfo();
+        info.setSignatureId("test-sig-3");
+        info.setChainRevocationStatus(ChainRevocationStatus.LEAF_GOOD_CA_REVOKED);
+
+        String json = mapper.writeValueAsString(info);
+
+        assertTrue(json.contains("\"chainRevocationStatus\":\"LEAF_GOOD_CA_REVOKED\""),
+                "chainRevocationStatus enum adiyla raporlanmali: " + json);
+    }
+
+    @Test
+    @DisplayName("JSON: chainRevocationStatus null ise alan JSON'a dusmez (NON_NULL)")
+    void jsonSerialization_omitsChainStatusWhenNull() throws Exception {
+        SignatureInfo info = new SignatureInfo();
+        info.setSignatureId("test-sig-4");
+
+        String json = mapper.writeValueAsString(info);
+
+        assertFalse(json.contains("chainRevocationStatus"),
+                "chainRevocationStatus null'sa JSON'a basilmamali: " + json);
     }
 }

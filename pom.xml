@@ -306,7 +306,27 @@
             <artifactId>jsoup</artifactId>
             <version>1.17.2</version>
         </dependency>
-        
+
+        <!--
+             Caffeine in-memory cache — OCSP/CRL revocation response cache'i icin.
+             ===========================================================
+             NEDEN 2.9.3?
+               • Caffeine 3.x JDK 11+ bytecode istiyor (Map.entry default
+                 methods vs.). Bu modul Java 1.8 hedefli (pom.xml properties).
+               • 2.9.x serisi son LTS-benzeri 2.x release'i; Spring Boot
+                 2.7.x bagimliliklarinin yonettigi versiyon ailesi.
+             KULLANIM YERI:
+               services.revocation.LoggingCachingOCSPSource
+               services.revocation.LoggingCachingCRLSource
+             Wrapper'lar DSS'in OnlineOCSPSource/OnlineCRLSource'unu sararak
+             ayni token icin kisa surede tekrar HTTP fetch yapilmasini onler.
+        -->
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+            <version>2.9.3</version>
+        </dependency>
+
         <!-- Test Dependencies -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

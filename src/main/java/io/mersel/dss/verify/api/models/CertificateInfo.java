@@ -27,6 +27,12 @@ public class CertificateInfo {
     private String revocationReason;
     private Date revocationTime;
     private Date revocationDate;
+    /**
+     * OCSP/CRL kaynaklı zengin iptal detayı. Online doğrulama kapalıysa veya
+     * sertifika için DSS revocation data üretemediyse {@code null} kalır ve
+     * {@code @JsonInclude(NON_NULL)} sayesinde response'a düşmez.
+     */
+    private RevocationInfo revocation;
 
     // Getters and Setters
     public String getCommonName() {
@@ -171,6 +177,14 @@ public class CertificateInfo {
 
     public void setRevocationDate(Date revocationDate) {
         this.revocationDate = revocationDate;
+    }
+
+    public RevocationInfo getRevocation() {
+        return revocation;
+    }
+
+    public void setRevocation(RevocationInfo revocation) {
+        this.revocation = revocation;
     }
 }
 

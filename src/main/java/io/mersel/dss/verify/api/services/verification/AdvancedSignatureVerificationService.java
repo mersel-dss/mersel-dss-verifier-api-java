@@ -15,10 +15,9 @@ import eu.europa.esig.dss.model.DSSDocument;
 import eu.europa.esig.dss.model.InMemoryDocument;
 import eu.europa.esig.dss.simplereport.SimpleReport;
 import eu.europa.esig.dss.spi.x509.CertificateSource;
-import eu.europa.esig.dss.spi.x509.aia.DefaultAIASource;
-import eu.europa.esig.dss.service.crl.OnlineCRLSource;
-import eu.europa.esig.dss.service.ocsp.OnlineOCSPSource;
-import eu.europa.esig.dss.service.http.commons.CommonsDataLoader;
+import eu.europa.esig.dss.spi.x509.aia.AIASource;
+import eu.europa.esig.dss.spi.x509.revocation.crl.CRLSource;
+import eu.europa.esig.dss.spi.x509.revocation.ocsp.OCSPSource;
 import eu.europa.esig.dss.spi.signature.AdvancedSignature;
 import eu.europa.esig.dss.spi.validation.CertificateVerifier;
 import eu.europa.esig.dss.spi.validation.CommonCertificateVerifier;
@@ -34,6 +33,7 @@ import io.mersel.dss.verify.api.models.enums.VerificationLevel;
 import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService;
 import io.mersel.dss.verify.api.services.util.EcdsaXmlSignaturePreprocessor;
 import io.mersel.dss.verify.api.services.util.LegacyTurkishXadesTypeUriDetector;
+import io.mersel.dss.verify.api.services.util.RevocationInfoExtractor;
 import io.mersel.dss.verify.api.services.util.XadesSignaturePackagingDetector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -78,6 +78,33 @@ public class AdvancedSignatureVerificationService {
 
     @Autowired
     private XadesSignaturePackagingDetector xadesPackagingDetector;
+
+    @Autowired
+    private RevocationInfoExtractor revocationInfoExtractor;
+
+    /**
+     * Cache + logging sarmalli OCSP source. Spring bean'i
+     * {@link io.mersel.dss.verify.api.config.RevocationServicesConfiguration}
+     * tarafindan kosullu olarak yaratilir; <code>verification.online-validation-enabled=false</code>
+     * iken context'te bulunmaz. {@code required=false} ile inject ediyoruz ki
+     * offline modda servis bootstrap'i bozulmasin.
+     */
+    @Autowired(required = false)
+    private OCSPSource cachedOcspSource;
+
+    /**
+     * Cache + logging sarmalli CRL source. {@link #cachedOcspSource} ile ayni
+     * yasam dongusu kurallari.
+     */
+    @Autowired(required = false)
+    private CRLSource cachedCrlSource;
+
+    /**
+     * AIA source (Authority Information Access) — sertifika zinciri eksik
+     * geldiginde ara CA fetch icin. Yine online validation ile gate'lenmis.
+     */
+    @Autowired(required = false)
+    private AIASource cachedAiaSource;
 
     /**
      * Mesaj anahtarı: DSS BBB SAV içinde "ne message-digest ne SignedProperties
@@ -355,40 +382,52 @@ public class AdvancedSignatureVerificationService {
     }
 
     /**
-     * Gelişmiş certificate verifier oluşturur
-     * - OCSP ve CRL desteği
-     * - AIA (Authority Information Access) desteği
-     * - Trusted certificate source
+     * Gelişmiş certificate verifier oluşturur.
+     *
+     * <p>Revocation source'lari (OCSP/CRL/AIA) Spring tarafindan
+     * {@link io.mersel.dss.verify.api.config.RevocationServicesConfiguration}
+     * uzerinden saglanir; bu sayede:</p>
+     * <ul>
+     *   <li>Caffeine cache uygulamanin yasam dongusunce paylasilir
+     *       (her doğrulamada sifirlanmaz),</li>
+     *   <li>HTTP timeout'lari merkezi olarak konfigure edilir,</li>
+     *   <li>OCSP/CRL HTTP istegi atildigi anda INFO seviyesinde
+     *       audit log dusulur.</li>
+     * </ul>
+     *
+     * <p><strong>Online validation devre disi</strong> ({@code verification.online-validation-enabled=false})
+     * iken bean'ler context'te yoktur; verifier sadece kriptografik butunluk
+     * ve trusted chain kontrolu yapar — revocation tabakasi devre disi.</p>
      */
     private CertificateVerifier createAdvancedCertificateVerifier() {
         CommonCertificateVerifier verifier = new CommonCertificateVerifier();
 
-        // Trusted certificate source'u ayarla
         CertificateSource trustedSource = rootCertificateService.getTrustedCertificateSource();
         verifier.addTrustedCertSources(trustedSource);
 
-        // Online validation aktifse OCSP ve CRL source'ları ekle
         if (config.isOnlineValidationEnabled()) {
-            // OCSP Source
-            OnlineOCSPSource ocspSource = new OnlineOCSPSource();
-            // CommonsDataLoader dataLoader = new CommonsDataLoader();
-            // dataLoader.setTimeoutConnection(10000);
-            // dataLoader.setTimeoutSocket(10000);
-            // ocspSource.setDataLoader(dataLoader);
-            verifier.setOcspSource(ocspSource);
-
-            // CRL Source
-            OnlineCRLSource crlSource = new OnlineCRLSource();
-            // crlSource.setDataLoader(dataLoader);
-            verifier.setCrlSource(crlSource);
-
-            // AIA Source (sertifika zinciri için)
-            DefaultAIASource aiaSource = new DefaultAIASource();
-            verifier.setAIASource(aiaSource);
-
-            logger.info("Online validation enabled: OCSP and CRL sources configured");
+            if (cachedOcspSource != null) {
+                verifier.setOcspSource(cachedOcspSource);
+            } else {
+                logger.warn("verification.online-validation-enabled=true fakat OCSPSource bean'i bulunamadi; "
+                        + "OCSP kontrolu yapilamayacak");
+            }
+            if (cachedCrlSource != null) {
+                verifier.setCrlSource(cachedCrlSource);
+            } else {
+                logger.warn("verification.online-validation-enabled=true fakat CRLSource bean'i bulunamadi; "
+                        + "CRL kontrolu yapilamayacak");
+            }
+            if (cachedAiaSource != null) {
+                verifier.setAIASource(cachedAiaSource);
+            } else {
+                logger.warn("verification.online-validation-enabled=true fakat AIASource bean'i bulunamadi; "
+                        + "AIA chain fetch yapilamayacak");
+            }
+            logger.debug("CertificateVerifier built with online revocation sources (cache + logging)");
         } else {
-            logger.info("Online validation disabled");
+            logger.info("Online validation disabled — OCSP/CRL/AIA source'lari verifier'a baglanmiyor "
+                    + "(yalniz kriptografik butunluk ve trusted chain kontrolu yapilacak)");
         }
 
         return verifier;
@@ -783,13 +822,20 @@ public class AdvancedSignatureVerificationService {
             sigInfo.setTimestampCount(timestamps.size());
         }
 
+        // Sertifika zincirinin revocation durumu — SIMPLE/COMPREHENSIVE fark
+        // etmeksizin hesaplanir. SIMPLE modda kullanici zincirin tam detayini
+        // (certificateChain[]) gormez, ancak bu kompakt enum sayesinde
+        // "leaf GOOD ama bir CA REVOKED" gibi durumlari tek bakista anlar.
+        // Detay icin COMPREHENSIVE'a gecmesi gerekir.
+        List<CertificateWrapper> chainForStatus = signatureWrapper.getCertificateChain();
+        sigInfo.setChainRevocationStatus(revocationInfoExtractor.computeChainStatus(chainForStatus));
+
         // Comprehensive mod için ek bilgiler
         if (level == VerificationLevel.COMPREHENSIVE) {
             // Tüm sertifika zinciri
             List<CertificateInfo> certChain = new ArrayList<>();
-            List<CertificateWrapper> certWrappers = signatureWrapper.getCertificateChain();
-            if (certWrappers != null) {
-                for (CertificateWrapper cert : certWrappers) {
+            if (chainForStatus != null) {
+                for (CertificateWrapper cert : chainForStatus) {
                     if (cert != null) {
                         certChain.add(extractCertificateInfo(cert));
                     }
@@ -825,8 +871,26 @@ public class AdvancedSignatureVerificationService {
         // Sertifika geçerlilik durumu
         Date now = new Date();
         boolean isExpired = certWrapper.getNotAfter() != null && now.after(certWrapper.getNotAfter());
-        boolean isRevoked = false; // DSS 6.3'te revocation bilgisi farklı şekilde alınıyor
-        
+
+        // Revocation bilgisini DSS DiagnosticData üzerinden zengin biçimde
+        // doldur. ÖNCEKİ DURUM: `isRevoked = false` hardcoded'tu ve
+        // `revocation*` alanları hiç set edilmiyordu — REVOKED bir sertifika
+        // bile response'da "revoked: false" görünüyordu. Şimdi zincirdeki her
+        // sertifika için OCSP/CRL kaynaklı en uygun revocation token'ı seçip
+        // hem geriye dönük field'ları (revoked, revocationReason,
+        // revocationDate, revocationTime) hem de zengin `revocation` alt
+        // nesnesini populate ediyoruz.
+        RevocationInfo revocation = revocationInfoExtractor.extractFor(certWrapper);
+        boolean isRevoked = revocation != null && "REVOKED".equals(revocation.getStatus());
+        if (revocation != null) {
+            certInfo.setRevocation(revocation);
+            certInfo.setRevocationReason(revocation.getRevocationReason());
+            certInfo.setRevocationDate(revocation.getRevocationDate());
+            // `revocationTime` legacy alan; tarihsel API uyumluluğu için
+            // `revocationDate` ile aynı değeri taşır.
+            certInfo.setRevocationTime(revocation.getRevocationDate());
+        }
+
         certInfo.setValid(!isExpired && !isRevoked);
         certInfo.setRevoked(isRevoked);
         certInfo.setExpired(isExpired);
@@ -901,7 +965,16 @@ public class AdvancedSignatureVerificationService {
                 Date now = new Date();
                 boolean notExpired = signingCert.getNotAfter() != null && now.before(signingCert.getNotAfter());
                 details.setCertificateNotExpired(notExpired);
-                details.setCertificateNotRevoked(true); // DSS 6.3'te farklı kontrol
+
+                // ÖNCEDEN: `setCertificateNotRevoked(true)` hardcoded'tu — REVOKED
+                // imzacı sertifika için bile response'da
+                // `certificateNotRevoked: true` görünüyordu. DSS DiagnosticData
+                // üzerinden gerçek iptal durumunu okuyoruz. Revocation verisi
+                // yoksa (örn. çevrimdışı mod) `true` döneriz; bu, "iptal
+                // olduğuna dair bir kanıt yok" anlamına gelir — politika
+                // strict moddaysa imzanın `valid` field'ı DSS tarafından
+                // FAIL'lenmiş olur, dolayısıyla bu varsayım güvenli.
+                details.setCertificateNotRevoked(revocationInfoExtractor.isNotRevoked(signingCert));
             }
 
             // Trust anchor

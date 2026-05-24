@@ -1,18 +1,22 @@
 package io.mersel.dss.verify.api.services.timestamp;
 
+import eu.europa.esig.dss.enumerations.CertificateStatus;
 import eu.europa.esig.dss.enumerations.DigestAlgorithm;
 import eu.europa.esig.dss.spi.DSSUtils;
+import eu.europa.esig.dss.spi.x509.revocation.crl.CRLSource;
+import eu.europa.esig.dss.spi.x509.revocation.crl.CRLToken;
+import eu.europa.esig.dss.spi.x509.revocation.ocsp.OCSPSource;
+import eu.europa.esig.dss.spi.x509.revocation.ocsp.OCSPToken;
 import eu.europa.esig.dss.spi.x509.tsp.TimestampToken;
 import eu.europa.esig.dss.model.x509.CertificateToken;
-import eu.europa.esig.dss.service.crl.OnlineCRLSource;
-import eu.europa.esig.dss.service.ocsp.OnlineOCSPSource;
-import eu.europa.esig.dss.service.http.commons.CommonsDataLoader;
 import io.mersel.dss.verify.api.config.VerificationConfiguration;
 import io.mersel.dss.verify.api.dtos.TimestampVerificationResponseDto;
 import io.mersel.dss.verify.api.exceptions.TimestampException;
 import io.mersel.dss.verify.api.models.CertificateInfo;
+import io.mersel.dss.verify.api.models.RevocationInfo;
 import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService;
 import io.mersel.dss.verify.api.services.util.CertificateInfoExtractor;
+import io.mersel.dss.verify.api.services.util.RevocationInfoExtractor;
 import org.bouncycastle.tsp.TimeStampResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -47,6 +51,26 @@ public class AdvancedTimestampVerificationService {
 
     @Autowired
     private CertificateInfoExtractor certificateInfoExtractor;
+
+    @Autowired
+    private RevocationInfoExtractor revocationInfoExtractor;
+
+    /**
+     * Cache + logging sarmalli OCSP source.
+     * {@link io.mersel.dss.verify.api.config.RevocationServicesConfiguration}'da
+     * <code>verification.online-validation-enabled=true</code> iken yaratilir;
+     * kapali iken context'te yoktur, {@code required=false} ile graceful
+     * inject ediliyor.
+     */
+    @Autowired(required = false)
+    private OCSPSource ocspSource;
+
+    /**
+     * Cache + logging sarmalli CRL source. {@link #ocspSource} ile ayni
+     * yasam dongusu.
+     */
+    @Autowired(required = false)
+    private CRLSource crlSource;
 
     /**
      * Zaman damgasını doğrular
@@ -286,10 +310,19 @@ public class AdvancedTimestampVerificationService {
 
             // 4. Revocation kontrolü (online validation aktifse)
             if (config.isOnlineValidationEnabled()) {
-                RevocationCheckResult revocationResult = checkRevocation(tsaCert);
+                CertificateToken issuerCert = findIssuerCertificate(tsaCert, certificates);
+                RevocationCheckResult revocationResult = checkRevocation(tsaCert, issuerCert);
                 if (!revocationResult.isValid()) {
                     errors.add(revocationResult.getError());
                 }
+
+                // Revocation token elde edildiyse TSA cert info'ya yansit.
+                // `CertificateInfoExtractor.extractCertificateInfo(CertificateToken)`
+                // ham token'dan revocation alani turetemedigi icin
+                // (DSS DiagnosticData yok) buraya kadar `revoked=false`
+                // hardcoded geliyordu — REVOKED bir TSA cert'i bile response'da
+                // "iptal degil" goruluyordu. Artik gercek durumu yansitiyoruz.
+                applyRevocationToCertInfo(certInfo, revocationResult.getRevocationInfo());
                 if (revocationResult.getWarning() != null) {
                     warnings.add(revocationResult.getWarning());
                 }
@@ -306,54 +339,165 @@ public class AdvancedTimestampVerificationService {
     }
 
     /**
-     * Sertifika revocation kontrolü yapar
+     * TSA sertifikası için revocation kontrolü yapar.
+     *
+     * <p><strong>Strateji (TSA-spesifik)</strong>:</p>
+     * <ol>
+     *   <li>Once OCSP denenir (varsa). Cogu KamuSM TSA sertifikasinda OCSP
+     *       endpoint'i tanimli degildir — bu normaldir, sessiz failover.</li>
+     *   <li>OCSP yoksa veya yanit alinamazsa CRL denenir. KamuSM TSA'lar icin
+     *       CRL ana iptal yayinlama mekanizmasidir.</li>
+     *   <li>Iki kaynak da yoksa <em>WARN</em> donulur — TSA sertifikasi
+     *       iptal edildi mi belirsiz; fakat <em>error</em> degildir, cunku
+     *       imzaci akisinin aksine timestamp icin signer-strict policy
+     *       zaten WARN seviyesinde toleranslidir.</li>
+     *   <li>Iptal edilmis (REVOKED) cevap alinirsa <em>error</em> donulur —
+     *       belirsizlik degil net ret.</li>
+     * </ol>
+     *
+     * <p>Cache + INFO logging davranisi {@link OCSPSource}/{@link CRLSource}
+     * bean'lerinin sarmalindan otomatik gelir.</p>
      */
-    private RevocationCheckResult checkRevocation(CertificateToken certificate) {
+    private RevocationCheckResult checkRevocation(CertificateToken certificate, CertificateToken issuer) {
         RevocationCheckResult result = new RevocationCheckResult();
-        result.setValid(true); // Varsayılan olarak geçerli
-        
-        try {
-            // OCSP kontrolü
-            try {
-                OnlineOCSPSource ocspSource = new OnlineOCSPSource();
-                CommonsDataLoader dataLoader = new CommonsDataLoader();
-                dataLoader.setTimeoutConnection(5000);
-                dataLoader.setTimeoutSocket(5000);
-                ocspSource.setDataLoader(dataLoader);
-                
-                // OCSP kontrolü başarısız olsa bile devam et
-                logger.info("OCSP revocation check attempted for certificate: {}", 
-                        certificate.getSubject().getPrettyPrintRFC2253());
-                
-            } catch (Exception e) {
-                logger.debug("OCSP check failed: {}", e.getMessage());
-                result.setWarning("OCSP revocation kontrolü yapılamadı");
-            }
-            
-            // CRL kontrolü
-            try {
-                OnlineCRLSource crlSource = new OnlineCRLSource();
-                CommonsDataLoader dataLoader = new CommonsDataLoader();
-                dataLoader.setTimeoutConnection(5000);
-                dataLoader.setTimeoutSocket(5000);
-                crlSource.setDataLoader(dataLoader);
-                
-                logger.info("CRL revocation check attempted for certificate: {}", 
-                        certificate.getSubject().getPrettyPrintRFC2253());
-                
-            } catch (Exception e) {
-                logger.debug("CRL check failed: {}", e.getMessage());
-                if (result.getWarning() == null) {
-                    result.setWarning("CRL revocation kontrolü yapılamadı");
-                }
-            }
-            
-        } catch (Exception e) {
-            logger.error("Revocation check error: {}", e.getMessage());
-            result.setWarning("Revocation kontrolü sırasında hata oluştu");
+        result.setValid(true);
+
+        String subjectLabel = certificate.getSubject().getPrettyPrintRFC2253();
+
+        if (issuer == null) {
+            logger.warn("TSA revocation skipped: issuer certificate could not be located within the timestamp token "
+                    + "for subject='{}'", subjectLabel);
+            result.setWarning("TSA sertifikasinin issuer'i timestamp icerisinde bulunamadi; revocation kontrolu atlandi");
+            return result;
         }
-        
+
+        if (ocspSource == null && crlSource == null) {
+            logger.warn("TSA revocation skipped: neither OCSP nor CRL source bean is available "
+                    + "(verification.online-validation-enabled may be false)");
+            result.setWarning("Online revocation source'lari yapilandirilmamis; TSA revocation kontrolu yapilamadi");
+            return result;
+        }
+
+        // 1) OCSP
+        if (ocspSource != null) {
+            try {
+                OCSPToken ocsp = ocspSource.getRevocationToken(certificate, issuer);
+                if (ocsp != null && ocsp.getStatus() != null) {
+                    CertificateStatus status = ocsp.getStatus();
+                    logger.info("TSA OCSP status: subject='{}', status={}", subjectLabel, status);
+
+                    // Token'i response'a zengin bicimde yansitmak icin
+                    // RevocationInfo'ya cevir — caller bunu CertificateInfo'ya
+                    // koyacak (UI/audit gorunurlugu).
+                    result.setRevocationInfo(revocationInfoExtractor.fromToken(ocsp));
+
+                    if (status == CertificateStatus.REVOKED) {
+                        result.setValid(false);
+                        result.setError("TSA sertifikasi OCSP'ye gore iptal edilmis (revocationDate="
+                                + ocsp.getRevocationDate() + ")");
+                        return result;
+                    }
+                    if (status == CertificateStatus.GOOD) {
+                        return result; // GOOD — basari, kontrol bitti
+                    }
+                    // UNKNOWN — CRL'e dus
+                    logger.info("TSA OCSP status UNKNOWN; falling back to CRL");
+                } else {
+                    logger.debug("TSA OCSP returned no token; will try CRL");
+                }
+            } catch (RuntimeException e) {
+                logger.warn("TSA OCSP check threw: {}; will try CRL", e.getMessage());
+            }
+        }
+
+        // 2) CRL
+        if (crlSource != null) {
+            try {
+                CRLToken crl = crlSource.getRevocationToken(certificate, issuer);
+                if (crl != null && crl.getStatus() != null) {
+                    CertificateStatus status = crl.getStatus();
+                    logger.info("TSA CRL status: subject='{}', status={}", subjectLabel, status);
+
+                    // CRL token'i RevocationInfo'ya cevir. Eger OCSP daha
+                    // once UNKNOWN dondurduyse onun yerini alir — son soyleyen
+                    // kaynak (CRL) daha kesin.
+                    result.setRevocationInfo(revocationInfoExtractor.fromToken(crl));
+
+                    if (status == CertificateStatus.REVOKED) {
+                        result.setValid(false);
+                        result.setError("TSA sertifikasi CRL'e gore iptal edilmis (revocationDate="
+                                + crl.getRevocationDate() + ")");
+                        return result;
+                    }
+                    return result; // GOOD veya UNKNOWN — TSA katmaninda toleranslı
+                } else {
+                    logger.debug("TSA CRL returned no token for subject='{}'", subjectLabel);
+                }
+            } catch (RuntimeException e) {
+                logger.warn("TSA CRL check threw: {}", e.getMessage());
+            }
+        }
+
+        // Iki kaynak da islem yapamadı — WARN
+        result.setWarning("TSA revocation kontrolu OCSP/CRL kaynaklarindan dogrulanamadi");
         return result;
+    }
+
+    /**
+     * Timestamp token icinde gelen sertifika listesinde TSA sertifikasinin
+     * issuer'ini bulur. {@code TimestampToken.getCertificates()} TSA cert'i
+     * 0. indekste, issuer ve daha ust CA'lar sonraki indekslerde gelir
+     * (RFC 3161). Issuer DN eslestirmesi ile bulunur — sirayla
+     * guvenmiyoruz cunku bazi TSA'lar full chain gondermez.
+     */
+    private CertificateToken findIssuerCertificate(CertificateToken tsaCert, List<CertificateToken> chain) {
+        if (tsaCert == null || chain == null || chain.isEmpty()) {
+            return null;
+        }
+        String issuerDn = tsaCert.getIssuer().getCanonical();
+        for (CertificateToken candidate : chain) {
+            if (candidate == tsaCert) {
+                continue;
+            }
+            if (issuerDn != null && issuerDn.equals(candidate.getSubject().getCanonical())) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Bir {@link RevocationInfo}'yu TSA {@link CertificateInfo}'sunun ilgili
+     * alanlarina (revoked, revocationReason, revocationDate, revocationTime,
+     * revocation, valid) tutarli bicimde yansitir.
+     *
+     * <p>Imzaci sertifikasi icin
+     * {@code AdvancedSignatureVerificationService.extractCertificateInfo(...)}
+     * icindeki ayni mantigin TSA paraleli — DRY icin static, simple timestamp
+     * endpoint'i de buradan yararlanabilsin diye package-private.
+     *
+     * <p>{@code info} {@code null} ise (revocation kontrolu yapilmadi veya
+     * basarisiz) hicbir alanı degistirmez. Bu, geriye donuk uyumlu davranis:
+     * cevrimdisi modda TSA cert info eskiden oldugu gibi sade kalir.
+     */
+    static void applyRevocationToCertInfo(CertificateInfo certInfo, RevocationInfo info) {
+        if (certInfo == null || info == null) {
+            return;
+        }
+        certInfo.setRevocation(info);
+        certInfo.setRevocationReason(info.getRevocationReason());
+        certInfo.setRevocationDate(info.getRevocationDate());
+        // Legacy alan — `revocationDate` ile ayni degeri tasir.
+        certInfo.setRevocationTime(info.getRevocationDate());
+
+        boolean isRevoked = "REVOKED".equals(info.getStatus());
+        certInfo.setRevoked(isRevoked);
+        if (isRevoked) {
+            // Expired olmayan ama REVOKED bir cert'in `valid` field'i artik
+            // false dondurulur — onceden hardcoded `setRevoked(false)`
+            // yuzunden `valid: true` gorunuyordu.
+            certInfo.setValid(false);
+        }
     }
 
     // Inner classes for structured results
@@ -388,6 +532,13 @@ public class AdvancedTimestampVerificationService {
         private boolean valid;
         private String error;
         private String warning;
+        /**
+         * Sorgulanan OCSP/CRL token'indan turetilen zengin revocation
+         * bilgisi. Caller bunu {@link CertificateInfo#setRevocation(RevocationInfo)}
+         * ile TSA sertifikasi response'una yansitir. Token alinamadiysa
+         * {@code null}.
+         */
+        private RevocationInfo revocationInfo;
 
         public boolean isValid() { return valid; }
         public void setValid(boolean valid) { this.valid = valid; }
@@ -395,6 +546,8 @@ public class AdvancedTimestampVerificationService {
         public void setError(String error) { this.error = error; }
         public String getWarning() { return warning; }
         public void setWarning(String warning) { this.warning = warning; }
+        public RevocationInfo getRevocationInfo() { return revocationInfo; }
+        public void setRevocationInfo(RevocationInfo revocationInfo) { this.revocationInfo = revocationInfo; }
     }
 }
 

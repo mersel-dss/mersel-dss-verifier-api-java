@@ -37,11 +37,111 @@ public class VerificationConfiguration {
     @Value("${CERT_CACHE_TTL:3600}")
     private int certCacheTtl;
 
+    /**
+     * <strong>Eski property — geriye donuk uyumluluk icin korunuyor.</strong>
+     * Yeni revocation cache sistemi {@code verification.revocation.cache.ttl-seconds}
+     * property'sini kullanir; {@code CRL_CACHE_TTL} oraya default deger besler.
+     */
     @Value("${CRL_CACHE_TTL:3600}")
     private int crlCacheTtl;
 
     @Value("${verification.strict-mode:true}")
     private boolean strictMode;
+
+    // --- Revocation (OCSP/CRL) cache + HTTP timeout konfigurasyonu ---
+    // Bu property'ler RevocationServicesConfiguration tarafindan tuketilir;
+    // wrapper'lar (LoggingCachingOCSPSource / LoggingCachingCRLSource) buradaki
+    // degerlere gore Caffeine cache + HTTP timeout'larini kurar.
+
+    /**
+     * Cache'te tutulacak maksimum revocation token sayisi (OCSP ve CRL ayri
+     * cache'ler). KamuSM ekosisteminde aktif Mali Muhur sayisi dusuk
+     * oldugu icin 10K cok rahat yeter; bellek baski yapmadan haftalarca
+     * calisabilir.
+     */
+    @Value("${verification.revocation.cache.max-size:10000}")
+    private long revocationCacheMaxSize;
+
+    /**
+     * Default cache TTL (saniye). Token'in kendi {@code nextUpdate} alani
+     * varsa ondan kucuk olani secilir; <strong>bu deger ust sinirdir</strong>.
+     * Geriye donuk uyumluluk: belirtilmezse {@code CRL_CACHE_TTL} kullanilir.
+     */
+    @Value("${verification.revocation.cache.ttl-seconds:${CRL_CACHE_TTL:3600}}")
+    private long revocationCacheTtlSeconds;
+
+    /**
+     * HTTP connection timeout (ms) — OCSP responder veya CRL distribution
+     * point'e baglanma asamasi icin. Default 10s; KamuSM iclerinde yavas
+     * cevap veren ucler oldugu icin (TS depo) cok dusuk tutmuyoruz.
+     */
+    @Value("${verification.revocation.http.connection-timeout-ms:10000}")
+    private int revocationHttpConnectionTimeoutMs;
+
+    /**
+     * HTTP socket (read) timeout (ms) — response gelmeye basladiktan sonra
+     * iki paket arasinda beklenecek azami sure. CRL'ler MB seviyesine
+     * cikabildigi icin yine 10s.
+     */
+    @Value("${verification.revocation.http.socket-timeout-ms:10000}")
+    private int revocationHttpSocketTimeoutMs;
+
+    // --- Revocation Retry (OCSP/CRL transient hata toleransi) ---
+    // Strict policy revocation verisi ZORUNLU oldugundan tek bir transient
+    // hata (KamuSM 503, connection reset, TLS handshake glitch) gecerli bir
+    // imzayi INDETERMINATE'a dusurur. Retry bu flake'leri gercek kesintilerden
+    // ayirir: anlik hata -> imza valid, gercek kesinti -> hala FAIL.
+    //
+    // Algoritma: exponential backoff + jitter.
+    //   delay(n) = min(initialBackoff * multiplier^(n-1), maxBackoff)
+    //   sleepMs  = delay * (1 + uniform(-jitter, +jitter))
+
+    /**
+     * Retry mekanizmasinin master switch'i. <code>false</code> yapilirsa
+     * {@code maxAttempts=1} olarak davranilir (sadece ilk deneme).
+     * Default <strong>acik</strong> — uretimde flake toleransi standarttir.
+     */
+    @Value("${verification.revocation.retry.enabled:true}")
+    private boolean revocationRetryEnabled;
+
+    /**
+     * Toplam deneme sayisi. <code>1</code> = retry yok; <code>3</code> = 1 ilk
+     * deneme + 2 retry. KamuSM enpoint'lerine DDoS yapmamak icin sayiyi
+     * dusuk tutuyoruz; 5+ retry default kabul edilmez.
+     */
+    @Value("${verification.revocation.retry.max-attempts:3}")
+    private int revocationRetryMaxAttempts;
+
+    /**
+     * Ilk retry oncesi temel bekleme suresi (ms). KamuSM 503'leri tipik
+     * 200ms-1s aralikta cozulur; 200ms hizli ama yumusak baslangic.
+     */
+    @Value("${verification.revocation.retry.initial-backoff-ms:200}")
+    private long revocationRetryInitialBackoffMs;
+
+    /**
+     * Backoff ust siniri (ms). Exponential growth bu degere clamp'lenir;
+     * 2s default — bir imza icin total worst-case ~30s civari kalir
+     * (3 attempt × 10s HTTP timeout + 200ms+400ms backoff).
+     */
+    @Value("${verification.revocation.retry.max-backoff-ms:2000}")
+    private long revocationRetryMaxBackoffMs;
+
+    /**
+     * Her retry'da onceki backoff'un &ccedil;arpani.
+     * <code>1.0</code> = sabit backoff; <code>2.0</code> = ikiye katla (default).
+     */
+    @Value("${verification.revocation.retry.backoff-multiplier:2.0}")
+    private double revocationRetryBackoffMultiplier;
+
+    /**
+     * Jitter orani — <code>±jitterRatio</code> rastgele varyasyon
+     * (uniform). <code>0.2</code> = ±%20. Thundering herd onleme icin
+     * standart best-practice; 0.0 yapilirsa retry'lar tam saatte tetiklenir
+     * ve ayni anda dusen N istemci endpoint'i tekrar bombalayabilir.
+     */
+    @Value("${verification.revocation.retry.jitter-ratio:0.2}")
+    private double revocationRetryJitterRatio;
 
     /**
      * GİB / TÜBİTAK Mali Mühür DER-encoded ECDSA SignatureValue'sini
@@ -130,6 +230,86 @@ public class VerificationConfiguration {
 
     public void setStrictMode(boolean strictMode) {
         this.strictMode = strictMode;
+    }
+
+    public long getRevocationCacheMaxSize() {
+        return revocationCacheMaxSize;
+    }
+
+    public void setRevocationCacheMaxSize(long revocationCacheMaxSize) {
+        this.revocationCacheMaxSize = revocationCacheMaxSize;
+    }
+
+    public long getRevocationCacheTtlSeconds() {
+        return revocationCacheTtlSeconds;
+    }
+
+    public void setRevocationCacheTtlSeconds(long revocationCacheTtlSeconds) {
+        this.revocationCacheTtlSeconds = revocationCacheTtlSeconds;
+    }
+
+    public int getRevocationHttpConnectionTimeoutMs() {
+        return revocationHttpConnectionTimeoutMs;
+    }
+
+    public void setRevocationHttpConnectionTimeoutMs(int revocationHttpConnectionTimeoutMs) {
+        this.revocationHttpConnectionTimeoutMs = revocationHttpConnectionTimeoutMs;
+    }
+
+    public int getRevocationHttpSocketTimeoutMs() {
+        return revocationHttpSocketTimeoutMs;
+    }
+
+    public void setRevocationHttpSocketTimeoutMs(int revocationHttpSocketTimeoutMs) {
+        this.revocationHttpSocketTimeoutMs = revocationHttpSocketTimeoutMs;
+    }
+
+    public boolean isRevocationRetryEnabled() {
+        return revocationRetryEnabled;
+    }
+
+    public void setRevocationRetryEnabled(boolean revocationRetryEnabled) {
+        this.revocationRetryEnabled = revocationRetryEnabled;
+    }
+
+    public int getRevocationRetryMaxAttempts() {
+        return revocationRetryMaxAttempts;
+    }
+
+    public void setRevocationRetryMaxAttempts(int revocationRetryMaxAttempts) {
+        this.revocationRetryMaxAttempts = revocationRetryMaxAttempts;
+    }
+
+    public long getRevocationRetryInitialBackoffMs() {
+        return revocationRetryInitialBackoffMs;
+    }
+
+    public void setRevocationRetryInitialBackoffMs(long revocationRetryInitialBackoffMs) {
+        this.revocationRetryInitialBackoffMs = revocationRetryInitialBackoffMs;
+    }
+
+    public long getRevocationRetryMaxBackoffMs() {
+        return revocationRetryMaxBackoffMs;
+    }
+
+    public void setRevocationRetryMaxBackoffMs(long revocationRetryMaxBackoffMs) {
+        this.revocationRetryMaxBackoffMs = revocationRetryMaxBackoffMs;
+    }
+
+    public double getRevocationRetryBackoffMultiplier() {
+        return revocationRetryBackoffMultiplier;
+    }
+
+    public void setRevocationRetryBackoffMultiplier(double revocationRetryBackoffMultiplier) {
+        this.revocationRetryBackoffMultiplier = revocationRetryBackoffMultiplier;
+    }
+
+    public double getRevocationRetryJitterRatio() {
+        return revocationRetryJitterRatio;
+    }
+
+    public void setRevocationRetryJitterRatio(double revocationRetryJitterRatio) {
+        this.revocationRetryJitterRatio = revocationRetryJitterRatio;
     }
 
     public boolean isEcdsaDerPreprocessorEnabled() {

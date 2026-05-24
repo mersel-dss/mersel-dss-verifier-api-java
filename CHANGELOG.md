@@ -7,6 +7,192 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+### Added
+- **`chainRevocationStatus` — SIMPLE modda da zincir geneli ozet**:
+  Once SIMPLE mod tuketicisi yalniz `signerCertificate.revocation`'i goruyordu
+  — "leaf GOOD ama bir ara CA REVOKED" gibi senaryolar yalniz COMPREHENSIVE
+  modda `certificateChain[].revocation` alt nesneleriyle ifsa ediliyordu.
+  Yeni alan `SignatureInfo.chainRevocationStatus` her iki modda dolar; tek
+  bir enum string ile tuketicinin zincirin geneline dair tek bakista dogru
+  karari vermesini saglar. Detay icin yine `level=COMPREHENSIVE` gerekir.
+  - Yeni enum: `ChainRevocationStatus` (`models/enums` paketinde) — 5 deger:
+    - `ALL_GOOD` — leaf + tum ara CA'lar GOOD.
+    - `LEAF_REVOKED` — leaf REVOKED (CA durumuna bakilmaz, en kritik sinyal).
+    - `LEAF_GOOD_CA_REVOKED` — leaf GOOD ama bir ara CA REVOKED. `signer-strict`
+      profilinde imza yine `valid: true` (CA icin `NotRevoked=WARN`); `strict`
+      profilinde `valid: false` + `REVOKED_CA_NO_POE` sub-indication.
+    - `UNKNOWN` — leaf UNKNOWN, ya da leaf GOOD ama zincirde UNKNOWN var.
+    - `NOT_CHECKED` — hicbir cert icin revocation kontrolu yapilmadi
+      (cevrimdisi mod, B-level imza, responder hep down).
+  - Oncellendirme: leaf REVOKED > leaf UNKNOWN > CA REVOKED > CA UNKNOWN
+    > ALL_GOOD. Leaf'in durumu CA'dan once kazanir — guvenlik-first.
+  - Yeni metod: `RevocationInfoExtractor.computeChainStatus(List<CertificateWrapper>)`
+    — DSS DiagnosticData zinciri uzerinden enum'u hesaplar. Root cert icin
+    DSS revocation token uretmedigi (`null`) durumda sessizce atlar.
+  - `AdvancedSignatureVerificationService.populateSignatureInfo(...)` her
+    iki modda da bu metodu cagiriyor — SIMPLE'da da gorunur.
+  - 14 yeni unit test: `RevocationInfoExtractorTest` (10 yeni — `computeChainStatus`
+    icin null/empty, ALL_GOOD, LEAF_REVOKED, leaf UNKNOWN > CA REVOKED,
+    LEAF_GOOD_CA_REVOKED, leaf GOOD + CA UNKNOWN, leaf missing + CA var,
+    nothing checked, CA REVOKED > CA UNKNOWN, tek elemanli zincir),
+    `SignatureInfoTest` (4 yeni — setter/getter round-trip, null default,
+    JSON enum adi, NON_NULL omit).
+  - **Onemli kavramsal not**: Bu alan dogrulama kararini DEGISTIRMEZ.
+    DSS policy zincirin tamamini `SigningCertificate` + `CACertificate`
+    bloklari uzerinden kendi kurallari cercevesinde kontrol eder.
+    `chainRevocationStatus` yalniz UI/audit gorunurlugu icin bir ozet
+    sinyal — `signatures[].valid` hep DSS policy karariyla belirlenir.
+
+- **OCSP/CRL sonuclari artik response'a yansiyor** (`signerCertificate.revocation`
+  + `tsaCertificate.revocation`):
+  Daha once `CertificateInfo.revoked` hardcoded `false`, `revocationReason` /
+  `revocationDate` / `revocationTime` hicbir zaman set edilmiyordu —
+  REVOKED bir sertifika icin bile response'da `"revoked": false` goruluyordu.
+  Yeni davranis: DSS DiagnosticData'daki revocation token'larindan en uygun
+  olani secilip zengin bir `RevocationInfo` alt nesnesi olarak response'a
+  eklenir; geriye donuk alanlar (`revoked`, `revocationReason`,
+  `revocationDate`, `revocationTime`) da gercek degerle dolar.
+  - Yeni model: `RevocationInfo` (`@JsonInclude(NON_NULL)`); alanlar
+    `source` (OCSP|CRL), `status` (GOOD|REVOKED|UNKNOWN), `revocationDate`,
+    `revocationReason`, `producedAt`, `thisUpdate`, `nextUpdate`,
+    `responderUrl`, `origin` (EXTERNAL|CACHED|REVOCATION_VALUES|...).
+  - Yeni alan: `CertificateInfo.revocation`. Revocation token hic yoksa
+    (`null`) JSON'a dusmez — `@JsonInclude(NON_NULL)` ile sessiz omit.
+  - Yeni component: `RevocationInfoExtractor` (`services/util` paketinde).
+    SRP gozeterek `AdvancedSignatureVerificationService`'ten ayri tutuldu;
+    REVOKED varsa onu, yoksa en guncel `productionDate`'li token'i secer
+    (security-first policy). Tum DSS exception'lari defensive yutulur.
+    - `extractFor(CertificateWrapper)` — DSS DiagnosticData'dan extraction
+      (imza dogrulama akisi).
+    - `fromToken(RevocationToken<?>)` — ham OCSP/CRL token'larindan
+      extraction (standalone timestamp dogrulama akisi). Generic API:
+      hem OCSPToken hem CRLToken icin tek arayuz.
+    - `isNotRevoked(CertificateWrapper)` — `ValidationDetails` icin
+      hizli kontrol.
+  - Origin bilgisi LT-level imzalarda gomulu revocation'i ayirt etmeyi
+    saglar: `EXTERNAL` = canli sorgu, `CACHED` = Caffeine hit,
+    `REVOCATION_VALUES` / `CMS_SIGNED_DATA` = imzanin icinde gomulu kanit.
+  - `ValidationDetails.certificateNotRevoked` artik hardcoded `true` degil;
+    DSS DiagnosticData'dan gercek durum okunur. Cevrimdisi mod / revocation
+    verisi yok durumunda `true` doner (strict policy bunu zaten
+    `RevocationDataAvailable=FAIL` ile yakalar).
+  - **Timestamp dogrulama akisinda da simetri**:
+    - `AdvancedTimestampVerificationService.checkRevocation(...)` artik
+      sorgu sonucundaki OCSPToken/CRLToken'i `RevocationInfo`'ya cevirip
+      `RevocationCheckResult.revocationInfo`'ya koyar; caller bunu
+      `applyRevocationToCertInfo(certInfo, info)` static helper'i ile TSA
+      sertifika response'una yansitir. Eskiden `tsaCertificate.revoked`
+      hardcoded `false` goruluyordu — artik gercek durum.
+    - `TimestampVerificationService` (basit `/timestamp/verify` endpoint)
+      eskiden TSA cert icin hicbir revocation kontrolu yapmiyordu; artik
+      `online-validation-enabled=true` iken OCSP/CRL'i sorgulayip ayni
+      `applyRevocationToCertInfo(...)` ile TSA cert info'sunu zenginlestiriyor.
+      Online validation kapaliysa eski davranis korunur.
+  - 27 yeni unit test: `RevocationInfoTest` (6), `CertificateInfoRevocationTest`
+    (4), `RevocationInfoExtractorTest` (17 — `extractFor` icin 10 + `fromToken`
+    icin 7 senaryo: GOOD/REVOKED/UNKNOWN, OCSP/CRL, alan-bazli exception
+    toleransi, bos sourceURL, subtyping), `AdvancedTimestampVerificationServiceTest`
+    (5 — `applyRevocationToCertInfo` static helper'inin GOOD/REVOKED/UNKNOWN
+    /null davranisi).
+
+- **Revocation retry — anlik flake toleransi (strict-safe)**:
+  Strict policy (signer-strict / strict) revocation verisini ZORUNLU
+  isaretler; tek bir KamuSM 503 / connection reset / TLS glitch gecerli
+  bir e-Faturayi <code>INDETERMINATE/NO_REVOCATION_DATA</code>'ya
+  dusururdu. Yeni decorator katmani anlik flake'i gercek kesintilerden
+  ayirir — anlik flake'te retry basarili, gercek kesintide tum retry
+  tukenince hala FAIL doner (yani "iptal mi belli degil"i asla VALID
+  gostermez).
+  - Yeni sinif: `RetryPolicy` — immutable deger nesnesi. Field invariant'i
+    constructor'da fail-fast: <code>maxAttempts >= 1</code>,
+    <code>maxBackoffMs >= initialBackoffMs</code>,
+    <code>backoffMultiplier >= 1.0</code>,
+    <code>0 <= jitterRatio <= 1.0</code>.
+  - Yeni interface: `Sleeper` — `Thread.sleep` abstraction'i (test
+    deterministik kalsin diye); production'da `Sleeper.threadSleep()`.
+  - Yeni sinif: `RetryExecutor` — generic exponential backoff + jitter
+    runner. Davranis sozlesmesi: supplier `null` donerse retry YAPILMAZ
+    (transient degil); `RuntimeException` firlatirsa policy tukene kadar
+    dener, son exception caller'a yeniden firlatilir. Sleep sirasinda
+    `InterruptedException` -> interrupt flag restore + retry'larin
+    agresif sonlanmasi.
+  - Yeni decorator: `RetryingOCSPSource implements OCSPSource` —
+    `OnlineOCSPSource` ile `LoggingCachingOCSPSource` arasinda konumlanir
+    (cache hit retry'a girmez, sadece HTTP fetch hatalarinda devreye girer).
+  - Yeni decorator: `RetryingCRLSource implements CRLSource` — ayni mantik.
+  - Wiring: `RevocationServicesConfiguration` buildRetryPolicy()
+    helper'i ile config'i policy'ye cevirir. `policy.maxAttempts > 1`
+    ise decorator devreye girer, aksi halde direkt online source.
+    Decorator sirasi: `Online -> Retrying -> LoggingCaching ->
+    CertificateVerifier`.
+  - 6 yeni parametre (tamami env var ile override edilebilir):
+    - `verification.revocation.retry.enabled` (default `true`)
+    - `verification.revocation.retry.max-attempts` (default `3`)
+    - `verification.revocation.retry.initial-backoff-ms` (default `200`)
+    - `verification.revocation.retry.max-backoff-ms` (default `2000`)
+    - `verification.revocation.retry.backoff-multiplier` (default `2.0`)
+    - `verification.revocation.retry.jitter-ratio` (default `0.2`)
+  - 30 yeni unit test: `RetryPolicyTest` (10), `RetryExecutorTest` (9),
+    `RetryingOCSPSourceTest` (6), `RetryingCRLSourceTest` (5).
+    Mock'lanan `Sleeper` ile retry sayilarini, sleep progression'unu
+    ve interrupt davranisini saniyelerce yavaslamadan dogruluyoruz.
+  - Worst-case latency hesabi (audit icin): bir token icin
+    `maxAttempts * httpTimeout + Σ backoffs`. Default'larla
+    `3 * 10s + (0.2s + 0.4s) ~ 30.6s`. Tipik flake yalniz 0.2-0.4s ekler.
+
+- **Revocation cache observability — Prometheus metrics**:
+  `LoggingCachingOCSPSource` ve `LoggingCachingCRLSource` icindeki Caffeine
+  cache instance'lari artik Spring Boot Actuator uzerinden Prometheus'a
+  publish ediliyor. `/actuator/prometheus` endpoint'inde gorunen metric
+  aileleri (her ikisi de hem `mersel.revocation.ocsp` hem
+  `mersel.revocation.crl` tag'iyle ayni anda):
+  - `cache_size` — anlik cache entry sayisi.
+  - `cache_gets_total{result="hit"|"miss"}` — fetch istegi sayilari;
+    hit-rate buradan turetilir.
+  - `cache_puts_total` — cache'e girilen response sayisi (REVOKED/GOOD;
+    UNKNOWN ve null bilincli olarak cache'lenmez).
+  - `cache_evictions_total` — TTL veya size limit kaynakli evict sayisi.
+  - Operatorel kullanim: KamuSM responder yavasligini izlemek icin
+    `rate(cache_gets_total{result="miss"}[5m])`; gercek HTTP yuku icin
+    `rate(cache_puts_total[1h])`.
+  - Implementasyon: `RevocationServicesConfiguration` bean yaratimi
+    sirasinda `CaffeineCacheMetrics.monitor(registry, cache, name)` cagrisi
+    yapiyor. {@link io.micrometer.core.instrument.MeterRegistry}
+    `ObjectProvider` ile inject ediliyor — graceful degradation: registry
+    yoksa (orn. minimal test slice) metric kaydi atlanir, cache calismaya
+    devam eder.
+  - Wrapper'lara minimal eklenti: `public Cache<String, ?> caffeineCache()`
+    accessor — Spring tarafinda metric binding icin; Micrometer bagimliligi
+    bilincli olarak wrapper'a sizmaz (dependency yonu tek istikamette).
+
+### Fixed
+- **Sertifika iptal durumu response'a yansimiyordu** (kritik audit/compliance
+  bug'i): `AdvancedSignatureVerificationService.extractCertificateInfo(...)`
+  icindeki <code>boolean isRevoked = false; // DSS 6.3'te revocation bilgisi
+  farkli sekilde aliniyor</code> hardcoded'u ve
+  `createComprehensiveValidationDetails` icindeki <code>setCertificateNotRevoked(true);
+  // DSS 6.3'te farkli kontrol</code> hardcoded'u temizlendi. Imzanin
+  `valid` field'i zaten DSS policy tarafindan dogru raporlaniyordu (REVOKED
+  sertifikalar `INDETERMINATE` veya `TOTAL_FAILED` doneriyordu), ancak
+  `signerCertificate.revoked`, `revocationReason`, `revocationDate`,
+  `validationDetails.certificateNotRevoked` alanlari hep "iptal degil"
+  goruluyordu — UI ve audit tooling'i yaniltici. Artik tum bu alanlar DSS
+  DiagnosticData'dan dogru sekilde dolduruluyor.
+- **`CertificateInfoExtractor` icinde yaniltici hardcoded `setRevoked(false)`
+  satiri temizlendi**: Bu extractor ham `CertificateToken`'dan calisir ve
+  DSS DiagnosticData yoktur; revocation bilgisi uretemez. Eski kodda hardcoded
+  `false` set ediliyordu — caller bunu override etmediyse REVOKED bir TSA cert
+  bile "iptal degil" goruluyordu. Artik bu satir kaldirildi (primitive boolean
+  default'u olan `false` zaten korunur), revocation alanlarinin set edilmesi
+  sorumlulugu caller'a (timestamp dogrulama akisina) verildi.
+- **Davranis degisikligi — `CertificateInfo.valid` artik revocation'i da hesaba
+  katar**: Eskiden `valid = !expired` formulu kullaniliyordu (`isRevoked` hep
+  hardcoded `false` oldugu icin). Yeni formul: `valid = !expired && !revoked`.
+  Pratik sonuc: suresi gecmemis fakat REVOKED bir sertifika eskiden
+  `valid: true` raporlaniyordu, artik `valid: false` doner. Bu davranissal
+  dogru hareket; sadece API tuketicileri eski yanilgiya gore ozel bir
+  ozumleme yaptilarsa fark edebilir.
+
 ## [0.3.1] - 2026-05-23
 
 ### Added

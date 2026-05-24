@@ -1,6 +1,7 @@
 package io.mersel.dss.verify.api.models;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import io.mersel.dss.verify.api.models.enums.ChainRevocationStatus;
 import io.mersel.dss.verify.api.models.enums.SignaturePackaging;
 
 import java.util.Date;
@@ -36,6 +37,21 @@ public class SignatureInfo {
     private Date claimedSigningTime;
     private CertificateInfo signerCertificate;
     private List<CertificateInfo> certificateChain;
+    /**
+     * İmzanın sertifika zinciri (leaf + intermediate CA'lar) için
+     * revocation durumunun kompakt özeti. SIMPLE mod response'unda da
+     * görünür — kullanıcı zincirin tamamına dair detayı görmek için
+     * COMPREHENSIVE kullanmak zorunda kalmadan tek bakışta doğru
+     * kararı verebilsin.
+     *
+     * <p>Doğrulama <em>kararını</em> etkilemez; DSS policy zincirin
+     * tamamını {@code SigningCertificate} + {@code CACertificate} blokları
+     * üzerinden zaten kontrol eder. Bu alan yalnız UI/audit görünürlüğü
+     * için.</p>
+     *
+     * @see ChainRevocationStatus
+     */
+    private ChainRevocationStatus chainRevocationStatus;
     private TimestampInfo timestampInfo;
     private String signatureAlgorithm;
     private String digestAlgorithm;
@@ -133,6 +149,14 @@ public class SignatureInfo {
 
     public void setCertificateChain(List<CertificateInfo> certificateChain) {
         this.certificateChain = certificateChain;
+    }
+
+    public ChainRevocationStatus getChainRevocationStatus() {
+        return chainRevocationStatus;
+    }
+
+    public void setChainRevocationStatus(ChainRevocationStatus chainRevocationStatus) {
+        this.chainRevocationStatus = chainRevocationStatus;
     }
 
     public TimestampInfo getTimestampInfo() {

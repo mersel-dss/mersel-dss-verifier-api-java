@@ -62,7 +62,7 @@ Bu API, PAdES (PDF), XAdES (XML) dijital imzaların ve zaman damgalarının doğ
 - ✅ **Zaman Damgası Doğrulama** - RFC 3161 uyumlu, TSA sertifika kontrolü
 - ✅ **Message Imprint Doğrulama** - Orijinal veri ile timestamp eşleştirme
 - ✅ **Sertifika Zinciri Doğrulama** - Güvenilir root'a kadar tam zincir
-- ✅ **OCSP ve CRL Kontrolü** - Sertifika iptal durumu kontrolü
+- ✅ **Strict-Safe Revocation Pipeline** - OCSP/CRL üretim sınıfı: Caffeine cache (token `nextUpdate`-aware TTL + configurable üst sınır), exponential backoff + jitter retry (anlık flake toleransı), INFO seviyesinde audit log, Prometheus metric expose. Strict policy'de tüm retry'lar tükenirse imza güvenle `INDETERMINATE/NO_REVOCATION_DATA` döner — anlık kesinti yüzünden valid imza reddedilmez, gerçek kesintide de "iptal mi belli değil" asla VALID gösterilmez. Sonuçlar her sertifika için response'a zengin biçimde yansır (`signerCertificate.revocation` alt nesnesi: `source`, `status`, `responderUrl`, `producedAt`/`thisUpdate`/`nextUpdate`, `origin`, vb.).
 - ✅ **AIA Support** - Otomatik sertifika zinciri tamamlama
 - ✅ **Güvenilir Kök Sertifika Resolver Desteği** - Üç farklı resolver tipi
   - **KamuSM XML Depo Online**: İnternet üzerinden KamuSM XML deposunu yükler
@@ -190,8 +190,18 @@ curl -X POST http://localhost:8086/api/v1/verify/pades \
         "notAfter": "2025-01-01T00:00:00Z",
         "trusted": true,
         "expired": false,
-        "revoked": false
+        "revoked": false,
+        "revocation": {
+          "source": "OCSP",
+          "status": "GOOD",
+          "producedAt": "2024-11-07T14:20:03Z",
+          "thisUpdate": "2024-11-07T14:00:00Z",
+          "nextUpdate": "2024-11-07T15:00:00Z",
+          "responderUrl": "http://ocsp.kamusm.gov.tr",
+          "origin": "REVOCATION_VALUES"
+        }
       },
+      "chainRevocationStatus": "ALL_GOOD",
       "certificateChain": [...],
       "timestampInfo": {
         "valid": true,
@@ -303,7 +313,11 @@ CUSTOM_ROOT_CERT_PATH=/path/to/root.cer  # Özel root sertifika (opsiyonel)
 
 #### Validation Configuration
 ```bash
-ONLINE_VALIDATION_ENABLED=true      # Online OCSP/CRL kontrolü
+ONLINE_VALIDATION_ENABLED=true      # Online OCSP/CRL kontrolü (master switch).
+                                    # false: revocation source bean'leri context'e yaratılmaz,
+                                    # tek paket bile dışarı çıkmaz (air-gapped / offline modu).
+                                    # OCSP/CRL pipeline parametreleri için aşağıdaki
+                                    # "Revocation Pipeline (OCSP/CRL)" bölümüne bakın.
 VERIFICATION_STRICT_MODE=true       # Rapor seviyesi katılık: SubIndication varsa imza invalid sayılır
                                     # (Not: Bu DSS policy XML değildir; DSS validation kuralları
                                     #  için aşağıdaki "DSS Validation Policy" bölümüne bakın.)
@@ -311,7 +325,10 @@ TR_LEGACY_XADES_TOLERANCE=true      # KamuSM/GİB üreticisinin XAdES SignedProp
                                     # yazım hatasına tolerans (TÜBİTAK İmzager paritesi).
                                     # Detaylar için aşağıdaki "TR-Legacy XAdES Toleransı" bölümüne bakın.
 CERT_CACHE_TTL=3600                 # Sertifika cache süresi (saniye)
-CRL_CACHE_TTL=3600                  # CRL cache süresi (saniye)
+CRL_CACHE_TTL=3600                  # [LEGACY] CRL cache süresi (saniye). Geriye dönük uyumluluk
+                                    # için korunuyor; yeni revocation cache sistemi
+                                    # REVOCATION_CACHE_TTL'i kullanır — set edilmezse buradaki
+                                    # değer fallback olur. Detay: "Revocation Pipeline" bölümü.
 ```
 
 #### DSS Validation Policy
@@ -329,10 +346,16 @@ DSS_POLICY_PATH=                    # boş = profil kullan
 # DSS_POLICY_PATH=file:/etc/mersel-dss-verify/policy.xml
 ```
 
-| Profil          | İmzacı sertifika OCSP/CRL | Ara CA OCSP/CRL | TS signer OCSP/CRL | Ne zaman? |
-|-----------------|---------------------------|-----------------|--------------------|-----------|
-| `signer-strict` | **FAIL** (zorunlu)        | WARN            | WARN               | Mali Mühür / KamuSM üretim default'u. İptal kontrolü garanti, ara CA endpoint kesintilerinde yine validation devam eder. |
-| `strict`        | **FAIL**                  | **FAIL**        | **FAIL**           | eIDAS-QES paralel; online OCSP/CRL altyapısı kesintisiz olan ortamlar. |
+| Profil          | İmzacı sertifika OCSP/CRL | Ara CA OCSP/CRL | TS signer OCSP/CRL | TS CA OCSP/CRL | Ne zaman? |
+|-----------------|---------------------------|-----------------|--------------------|----------------|-----------|
+| `signer-strict` | **FAIL** (zorunlu)        | WARN            | WARN               | WARN           | Mali Mühür / KamuSM üretim default'u. İptal kontrolü garanti, ara CA endpoint kesintilerinde yine validation devam eder. |
+| `strict`        | **FAIL**                  | **FAIL**        | **FAIL**           | WARN           | eIDAS-QES paralel; online OCSP/CRL altyapısı kesintisiz olan ortamlar (sigorta, banka, kamu kurumu). |
+
+**Profil seçim kılavuzu** — özet:
+
+- **`signer-strict` (default)**: İmzacının iptali için zero-tolerance, ama ara CA OCSP responder'larının geçici kesintilerinde imzayı feda etmez. Türkiye e-Fatura / e-Defter ekosisteminde KamuSM ara CA'larının operasyonel realitesini gözeten **pragmatik denge**. Tüketici `chainRevocationStatus: LEAF_GOOD_CA_REVOKED` görse bile `valid: true` döner — politika tercihini explicit hale getirir.
+- **`strict`**: eIDAS QES paralelinde tüm zincir için sıkı davranış — ara CA REVOKED ise imza geçersiz. **Operasyonel kesinti tolere edilmez**; OCSP/CRL altyapısı garanti edilmiş kurumsal ortamlar için. `chainRevocationStatus: LEAF_GOOD_CA_REVOKED` durumunda `valid: false` + sub-indication `REVOKED_CA_NO_POE` döner.
+- **Custom XML**: Yukarıdaki iki profil ihtiyacı karşılamazsa `DSS_POLICY_PATH` ile kendi XML'inizi mount edin. Built-in profiller `src/main/resources/policy/` altında tam yorumlu, baz alabilirsiniz.
 
 **Önemli:** `DSS_POLICY_PATH` ile verilen XML erişilemezse servis sessizce
 DSS default'una düşmez — `VerificationException` atar. Built-in profil XML
@@ -352,6 +375,176 @@ katmanları için ayrı ayrı `RevocationDataAvailable`, `NotRevoked`,
 `AcceptableRevocationDataFound` vb. constraint'leri `FAIL/WARN/IGNORE`
 seviyesinde yapılandırabilirsiniz — DSS native policy şeması zaten
 katman bazlı (bkz. `SigningCertificate` ve `CACertificate` node'ları).
+
+#### Revocation Pipeline (OCSP/CRL)
+
+DSS policy revocation **kuralını** belirler (`RevocationDataAvailable=FAIL` mı, `WARN` mı, vb.); bu bölümdeki env'ler revocation **altyapısını** (HTTP fetch, cache, retry) yapılandırır. İkisi ortogonal.
+
+**Decorator sırası** (içten dışa):
+
+```
+OnlineOCSPSource / OnlineCRLSource   [DSS — gerçek HTTP fetch]
+   │
+   ▼ RetryingOCSPSource / RetryingCRLSource    [exponential backoff + jitter]
+   │
+   ▼ LoggingCachingOCSPSource / LoggingCachingCRLSource    [Caffeine cache + INFO log]
+   │
+   ▼ CertificateVerifier (DSS) — policy kararı uygular
+```
+
+Cache **dış** katman: cache hit retry'a girilmez (hızlı dönüş). Retry yalnız gerçek HTTP fetch'inde devreye girer. Strict-safe garantisi: tüm retry'lar tükenirse son exception `LoggingCachingOCSPSource`'ta WARN'lanır ve `null` döner → DSS `signer-strict` / `strict` policy'sindeki `RevocationDataAvailable=FAIL` kuralı tetiklenir → imza `INDETERMINATE/NO_REVOCATION_DATA`.
+
+##### Cache Parametreleri
+
+```bash
+REVOCATION_CACHE_MAX_SIZE=10000         # Cache'te tutulacak maks entry sayısı
+                                        # (OCSP ve CRL ayrı cache'ler — her biri 10K)
+REVOCATION_CACHE_TTL=3600               # Default TTL (saniye). Token'in kendi
+                                        # nextUpdate alanı varsa ondan küçük olan
+                                        # seçilir; bu değer ÜST SINIR (iptali geç
+                                        # görmeyelim diye). Set edilmezse legacy
+                                        # CRL_CACHE_TTL fallback olur.
+```
+
+**Cache davranış invariant'ları**:
+
+| Status | Cache'lenir mi? | Gerekçe |
+|---|---|---|
+| `GOOD` / `REVOKED` | ✅ Cache'lenir | Status sabit; tekrar fetch israf |
+| `UNKNOWN` | ❌ Cache'lenmez | Responder geçici down olabilir, bir sonraki çağrıda yeniden denenir |
+| `null` (responder boş döndü) | ❌ Cache'lenmez | Transient olabilir |
+| Exception (network fail) | ❌ Cache'lenmez | Retry exhausted sonrası |
+
+##### HTTP Timeout Parametreleri
+
+```bash
+REVOCATION_HTTP_CONNECT_TIMEOUT_MS=10000  # TCP connect timeout (ms)
+REVOCATION_HTTP_SOCKET_TIMEOUT_MS=10000   # Socket read timeout (ms).
+                                          # CRL'ler MB seviyesinde olabildiği için
+                                          # düşük tutmuyoruz.
+```
+
+##### Retry Parametreleri (Anlık Flake Toleransı)
+
+Strict policy revocation verisini ZORUNLU işaretler; tek bir KamuSM 503 / connection reset / TLS glitch geçerli bir e-Faturayı reddederdi. Retry mekanizması bunu çözer: anlık flake'te imza VALID kalır, gerçek kesintide hala FAIL.
+
+**Algoritma** — exponential backoff + jitter:
+```
+delay(n)  = min(initialBackoff * multiplier^(n-1), maxBackoff)
+sleepMs   = delay * (1 + uniform(-jitterRatio, +jitterRatio))
+```
+
+```bash
+REVOCATION_RETRY_ENABLED=true             # Master switch.
+                                          # false: maxAttempts=1 gibi davranır
+                                          # (sadece ilk deneme, retry yok).
+REVOCATION_RETRY_MAX_ATTEMPTS=3           # Toplam attempt: 1 = retry yok;
+                                          # 3 = 1 ilk + 2 retry. KamuSM uçlarını
+                                          # bombalamamak için >=5 default değildir.
+REVOCATION_RETRY_INITIAL_BACKOFF_MS=200   # İlk retry öncesi temel bekleme.
+                                          # KamuSM 503'leri tipik 200ms-1s içinde
+                                          # toparlanır.
+REVOCATION_RETRY_MAX_BACKOFF_MS=2000      # Exponential growth üst sınırı (clamp).
+REVOCATION_RETRY_BACKOFF_MULTIPLIER=2.0   # Her retry'da çarpan. 1.0 = sabit
+                                          # backoff; 2.0 = ikiye katla.
+REVOCATION_RETRY_JITTER_RATIO=0.2         # ±jitterRatio rastgele varyasyon
+                                          # (uniform). Thundering herd önleme
+                                          # standart best-practice'i; 0.0
+                                          # yaparsanız test determinizmi artar.
+```
+
+**Default'larla worst-case latency** (bir token için): `maxAttempts × httpTimeout + Σ backoffs` = `3 × 10s + (0.2s + 0.4s)` ≈ **30.6s** (KamuSM tamamen kapalıysa). Tipik flake yalnız +200-400ms ekler.
+
+**Senaryo örnekleri**:
+
+| Senaryo | `MAX_ATTEMPTS` | `INITIAL_BACKOFF_MS` | `MAX_BACKOFF_MS` | `JITTER_RATIO` | Worst-case latency |
+|---|---|---|---|---|---|
+| **Üretim default** (Mali Mühür) | 3 | 200 | 2000 | 0.2 | ~30.6s |
+| **Agresif retry** (KamuSM stresli) | 5 | 300 | 5000 | 0.2 | ~75s |
+| **Düşük-latency** (canlı API) | 2 | 100 | 1000 | 0.2 | ~20.1s |
+| **Deterministic test/CI** | 3 | 200 | 2000 | **0.0** | ~30.6s (sabit) |
+| **Retry kapalı** (`REVOCATION_RETRY_ENABLED=false`) | 1 (effective) | – | – | – | ~10s |
+
+##### Response — Revocation Detayları
+
+Her doğrulama response'unda zincir üzerindeki her sertifika için DSS DiagnosticData'sından çıkarılan zengin iptal detayı `signerCertificate.revocation` (ve `certificateChain[].revocation`) alt nesnesinde döner. Daha önce hem `revoked: false` hem `certificateNotRevoked: true` hardcoded'tu — REVOKED bir sertifika bile response'da "iptal değil" görünüyordu. Şimdi gerçek durum yansıtılır.
+
+```jsonc
+"signerCertificate": {
+  "subjectDN": "CN=Test User, ...",
+  "revoked": true,                          // geriye dönük; artık gerçeği yansıtır
+  "revocationReason": "KEY_COMPROMISE",
+  "revocationDate": "2024-09-15T08:30:00Z",
+  "revocation": {                           // YENİ — zengin detay
+    "source": "OCSP",                       // OCSP | CRL
+    "status": "REVOKED",                    // GOOD | REVOKED | UNKNOWN
+    "revocationDate": "2024-09-15T08:30:00Z",
+    "revocationReason": "KEY_COMPROMISE",
+    "producedAt": "2024-11-08T10:29:55Z",   // token üretim anı
+    "thisUpdate": "2024-11-08T10:00:00Z",   // token freshness başlangıcı
+    "nextUpdate": "2024-11-08T11:00:00Z",   // bir sonraki güncelleme (cache TTL ile uyumlu)
+    "responderUrl": "http://ocsp.kamusm.gov.tr",
+    "origin": "EXTERNAL"                    // EXTERNAL | CACHED | REVOCATION_VALUES | …
+  }
+}
+```
+
+**Alan anlamları**:
+
+| Alan | Anlam |
+|---|---|
+| `source` | İptal token'ının türü: `OCSP` veya `CRL`. |
+| `status` | Sertifikanın gerçek durumu: `GOOD` (iptal değil), `REVOKED` (iptalli), `UNKNOWN` (responder bilmiyor). |
+| `revocationDate` | Sertifikanın iptal edildiği an (yalnız `REVOKED` ise dolar). |
+| `revocationReason` | RFC 5280 iptal nedeni (örn. `KEY_COMPROMISE`, `CESSATION_OF_OPERATION`). |
+| `producedAt` | OCSP response / CRL'in üretildiği zaman. |
+| `thisUpdate` | Token'ın temsil ettiği bilginin geçerli olduğu başlangıç anı. |
+| `nextUpdate` | Bir sonraki güncellemenin beklendiği an. Cache TTL bu değerle clamp'lenir. |
+| `responderUrl` | İptal verisinin alındığı responder/dağıtım noktası — audit için kritik. |
+| `origin` | Veri menşei: `EXTERNAL` (canlı sorgu), `CACHED` (Caffeine cache hit), `REVOCATION_VALUES` / `CMS_SIGNED_DATA` (LT-level imzada gömülü), `TIMESTAMP_VALIDATION_DATA`, vb. |
+
+**`origin` neden önemli?** LT-level (PAdES/XAdES/CAdES BASELINE-LT) imzalarda revocation token'lar imzanın içinde gömülü gelir — bu durumda Mersel hiç OCSP/CRL ağ çağrısı yapmadan kararı verebilir. `origin: REVOCATION_VALUES` görüyorsanız "imzanın kendi içindeki güven kanıtı kullanıldı" demektir. `origin: EXTERNAL` ise canlı sorgu yapıldı (cache miss + retry zinciri çalıştı).
+
+**`revocation` ne zaman `null` olur?**
+
+- `ONLINE_VALIDATION_ENABLED=false` ve imza içinde gömülü revocation yoksa,
+- DSS sertifika için hiçbir revocation token üretemediyse (örn. B-level imza, çevrimdışı, AIA çözülmedi),
+- Responder ile hiç iletişim kurulamadı ve gömülü veri de yok.
+
+Bu durumda alan tamamen JSON'a düşmez (`@JsonInclude(NON_NULL)`). Strict policy'de imzanın `valid` field'ı zaten DSS tarafından `INDETERMINATE/NO_REVOCATION_DATA` ile FAIL'lenmiş olur.
+
+##### Zincir Genel Durumu — `chainRevocationStatus`
+
+`signatures[].chainRevocationStatus`, **her doğrulama modunda** (SIMPLE + COMPREHENSIVE) yayınlanan kompakt bir özet enum'dur. Önceden SIMPLE mod tüketicisi yalnız `signerCertificate.revocation`'i görüyordu; ara CA seviyesindeki "leaf GOOD ama bir CA REVOKED" gibi durumlar yalnız COMPREHENSIVE modda `certificateChain[].revocation` alt nesneleriyle ifşa ediliyordu. Bu alan tek bir string ile tüketicinin SIMPLE'da da zincirin geneline dair doğru kararı vermesini sağlar.
+
+```jsonc
+"signatures": [{
+  "valid": true,
+  "signerCertificate": { "revoked": false, ... },
+  "chainRevocationStatus": "ALL_GOOD"   // YENİ
+}]
+```
+
+**Değer matrisi**:
+
+| Değer | Anlam | Önerilen aksiyon |
+|---|---|---|
+| `ALL_GOOD` | Zincirdeki tüm sertifikalar (leaf + ara CA'lar) revocation kontrolünden `GOOD` geçti. | İşlemi gönül rahatlığıyla sürdür. |
+| `LEAF_REVOKED` | İmzacı sertifika **REVOKED**. CA durumu ne olursa olsun en kritik sinyal. | Imza üzerinde iş yapma; sertifika sahibine bilgi ver. |
+| `LEAF_GOOD_CA_REVOKED` | İmzacı `GOOD`, ama zincirdeki bir ara CA **REVOKED**. `signer-strict` profilinde imza yine `valid: true` döner (`NotRevoked=WARN`); `strict` profilinde imza geçersiz olur (`NotRevoked=FAIL`). | Politika tercihini sorgula; audit'e detay için COMPREHENSIVE çek. |
+| `UNKNOWN` | Zincirde bir veya daha fazla sertifika için durum `UNKNOWN` (responder cevap verdi ama "bilmiyorum" dedi) ya da leaf için karar verilemiyor. | Operasyonel sorun olabilir; COMPREHENSIVE ile incele. |
+| `NOT_CHECKED` | Hiçbir sertifika için revocation kontrolü yapılmadı/yapılamadı. Çevrimdışı mod, B-level imza, ya da responder hep down olabilir. | Çevrimdışı/strict kombinasyonu mu kontrol et. |
+
+**Önemli — Bu alan doğrulama kararını <em>değiştirmez</em>.** DSS policy zincirin tamamını `SigningCertificate` + `CACertificate` blokları üzerinden kendi kuralları çerçevesinde kontrol eder; `signatures[].valid` bu policy'ye göre belirlenir. `chainRevocationStatus` yalnız UI/audit görünürlüğü için bir özet sinyaldir.
+
+**Önceliklendirme**: Leaf `REVOKED` her zaman kazanır (`LEAF_REVOKED`). Leaf `UNKNOWN` ikinci önceliktedir (`UNKNOWN`) — CA `REVOKED` olsa bile imzacı için belirsizlik daha öncelikli sinyal. Sadece leaf `GOOD` ise CA seviyesi değerlendirilir.
+
+**Politika profilleri ile etkileşim**: 
+
+- `signer-strict` (default) + `LEAF_GOOD_CA_REVOKED` → `valid: true` (CA için sadece WARN). Operasyonel toleranslı.
+- `strict` + `LEAF_GOOD_CA_REVOKED` → `valid: false`, sub-indication: `REVOKED_CA_NO_POE` / benzeri. eIDAS QES paralelinde sıkı davranır.
+
+Detaylı zincir cert'lerine erişim için doğrulamayı `level=COMPREHENSIVE` ile çağırın — `certificateChain[i].revocation` alt nesneleri her cert için ayrı dolar.
 
 #### TR-Legacy XAdES Toleransı
 
@@ -531,6 +724,32 @@ Prometheus metrikleri `/actuator/prometheus` endpoint'inde sunulur:
 
 ```bash
 curl http://localhost:8086/actuator/prometheus
+```
+
+### Revocation Cache Metric Ailesi
+
+`LoggingCachingOCSPSource` ve `LoggingCachingCRLSource` Caffeine cache instance'ları Micrometer aracılığıyla otomatik publish edilir. Cache başına metric isimleri (Micrometer naming) ve `cache` tag'leri:
+
+| Metric | OCSP tag | CRL tag | Anlamı |
+|---|---|---|---|
+| `cache_size` | `cache="mersel.revocation.ocsp"` | `cache="mersel.revocation.crl"` | Anlık cache entry sayısı |
+| `cache_gets_total{result="hit"}` | aynı | aynı | Cache hit sayısı (HTTP fetch atlandı) |
+| `cache_gets_total{result="miss"}` | aynı | aynı | Cache miss sayısı (gerçek HTTP fetch tetiklendi) |
+| `cache_puts_total` | aynı | aynı | Cache'e konan response sayısı (GOOD/REVOKED; UNKNOWN ve null bilinçli cache'lenmez) |
+| `cache_evictions_total` | aynı | aynı | TTL veya size limit kaynaklı evict sayısı |
+
+**Operasyonel sorgu örnekleri** (PromQL):
+
+```promql
+# OCSP hit-rate (cache verimliliği)
+rate(cache_gets_total{cache="mersel.revocation.ocsp",result="hit"}[5m])
+  / rate(cache_gets_total{cache="mersel.revocation.ocsp"}[5m])
+
+# KamuSM endpoint'lerine giden gerçek HTTP fetch yükü
+rate(cache_puts_total{cache=~"mersel.revocation.(ocsp|crl)"}[1h])
+
+# Cache büyüklüğü trend (memory baskısı için)
+cache_size{cache=~"mersel.revocation.(ocsp|crl)"}
 ```
 
 Grafana ile birlikte çalıştırmak için:

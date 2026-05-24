@@ -61,10 +61,17 @@ public class CertificateInfoExtractor {
             // Expiry check
             Date now = new Date();
             info.setExpired(now.after(certToken.getNotAfter()) || now.before(certToken.getNotBefore()));
-            
-            // Revocation durumu başlangıçta false
-            info.setRevoked(false);
-            
+
+            // Revocation bilgisi burada bilincli olarak set EDILMEZ — bu
+            // extractor `DiagnosticData`'siz ham `CertificateToken`'dan calisir
+            // ve revocation kontrolu yapmaz. Caller (orn. TSA dogrulama akisi)
+            // online OCSP/CRL sorgusu yapip
+            // {@code AdvancedTimestampVerificationService.applyRevocationToCertInfo(...)}
+            // ile gercek durumu yansitir; aksi halde primitive default ({@code false})
+            // korunur. Onceki "info.setRevoked(false)" hardcoded'i REVOKED bir
+            // sertifikayi bile "iptal degil" gibi raporlayan yaniltici bir
+            // bug'a sebep oluyordu.
+
         } catch (Exception e) {
             // Hata durumunda sadece temel bilgileri dön
         }
