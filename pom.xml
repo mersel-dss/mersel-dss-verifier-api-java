@@ -345,6 +345,19 @@
             <artifactId>mockito-core</artifactId>
             <scope>test</scope>
         </dependency>
+
+        <!--
+             okhttp3 MockWebServer — InvalidSignatureNotifier'in HTTP
+             enqueue() akisini in-process gercek bir TCP server'la dogrular.
+             OkHttp 4.2.x ile esit versiyon (transitive uyum).
+             Sadece test scope; production fat-jar'a girmez.
+        -->
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>mockwebserver</artifactId>
+            <version>4.2.2</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

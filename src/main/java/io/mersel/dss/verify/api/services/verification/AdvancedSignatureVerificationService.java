@@ -32,6 +32,7 @@ import io.mersel.dss.verify.api.models.enums.RejectionCode;
 import io.mersel.dss.verify.api.models.enums.SuppressionCode;
 import io.mersel.dss.verify.api.models.enums.VerificationLevel;
 import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService;
+import io.mersel.dss.verify.api.services.notification.InvalidSignatureNotifier;
 import io.mersel.dss.verify.api.services.util.EcdsaXmlSignaturePreprocessor;
 import io.mersel.dss.verify.api.services.util.LegacyTurkishXadesAnomaly;
 import io.mersel.dss.verify.api.services.util.LegacyTurkishXadesTypeUriDetector;
@@ -83,6 +84,19 @@ public class AdvancedSignatureVerificationService {
 
     @Autowired
     private RevocationInfoExtractor revocationInfoExtractor;
+
+    /**
+     * INVALID imza tespit edildiğinde generic webhook ve/veya Slack
+     * incoming webhook'una <em>best-effort</em> bildirim gönderir.
+     * Feature default açık ama URL set edilmediği sürece no-op; ekstra
+     * heap/IO maliyeti sıfırdır. Aktif ise OkHttp {@code enqueue()} ile
+     * async POST atar — verifier thread'i HTTP'yi beklemez.
+     *
+     * <p>{@code required = false}: testlerde / minimal context'lerde
+     * notifier bean'i olmayabilir — verifier bootstrap bozulmasın.</p>
+     */
+    @Autowired(required = false)
+    private InvalidSignatureNotifier invalidSignatureNotifier;
 
     /**
      * Cache + logging sarmalli OCSP source. Spring bean'i
@@ -296,9 +310,60 @@ public class AdvancedSignatureVerificationService {
             VerificationResult result = parseAdvancedVerificationResult(
                     reports, level, signedBytes, packagingBySignatureId);
 
-            logger.info("Advanced signature verification completed. Valid: {}, Signatures: {}", 
+            logger.info("Advanced signature verification completed. Valid: {}, Signatures: {}",
                     result.isValid(), result.getSignatures().size());
-            
+
+            // INVALID ise konfigüre edilmiş webhook/Slack kanallarına async
+            // bildirim gönder. Best-effort: notifier kapalıysa veya URL set
+            // edilmemişse no-op; exception atarsa doğrulama akışı
+            // etkilenmeden devam eder. signedBytes parametresi ECDSA
+            // preprocessor sonrası halini taşıdığı için imza üreticisinin
+            // gönderdiği orijinalle birebir eşleşmeyebilir; receiver içerik
+            // forensik analizi için sha256Hex + size üzerinden de eşleştirme
+            // yapabilir.
+            //
+            // ÜÇ KATMAN DEFENSE: (1) notifier'ın kendi içindeki outer
+            // try/catch, (2) burada notifyIfInvalid() çağrısının try/catch'i,
+            // (3) originalDocument.getBytes() ayrı try/catch'te. Birinci ve
+            // ikinci katman fonksiyonel olarak aynı kontratı koruyor ama
+            // şu farkla: notifier bean'i refactor sırasında değişirse (örn.
+            // birisi outer catch'i yanlışlıkla kaldırırsa) buradaki ikinci
+            // katman yine güvenli tarafta kalır. Üçüncü katman MultipartFile
+            // implementasyonunun temp-file based olduğu senaryolarda IO
+            // hatasını izole eder — orijinal byte'lar okunamasa da
+            // signedBytes'la bildirim yine gider.
+            try {
+                if (invalidSignatureNotifier != null) {
+                    byte[] originalBytes = null;
+                    String originalFileName = null;
+                    if (originalDocument != null && !originalDocument.isEmpty()) {
+                        try {
+                            originalBytes = originalDocument.getBytes();
+                            originalFileName = originalDocument.getOriginalFilename();
+                        } catch (Exception readEx) {
+                            // MultipartFile temp-file delete edilmişse veya
+                            // disk hatası varsa exception atabilir. Bildirim
+                            // gönderebilmek için signedBytes yeter; null geç.
+                            logger.warn("Notifier için originalDocument byte'ları okunamadı "
+                                            + "(bildirim originalDocument alanı olmadan gönderilecek): {}",
+                                    readEx.getMessage());
+                        }
+                    }
+                    invalidSignatureNotifier.notifyIfInvalid(
+                            result,
+                            signedBytes,
+                            signedDocument != null ? signedDocument.getOriginalFilename() : null,
+                            signedDocument != null ? signedDocument.getContentType() : null,
+                            originalBytes,
+                            originalFileName);
+                }
+            } catch (Throwable notifyEx) {
+                // Throwable yakalıyoruz — bu satır verifier akışının son
+                // perdesi; bildirim adına HİÇBİR ŞEY response'u kıramamalı.
+                logger.warn("Invalid signature notification dispatch failed (yok sayıldı): {}",
+                        notifyEx.toString());
+            }
+
             return result;
 
         } catch (Exception e) {

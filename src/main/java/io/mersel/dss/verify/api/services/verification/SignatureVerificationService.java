@@ -14,6 +14,7 @@ import io.mersel.dss.verify.api.models.*;
 import io.mersel.dss.verify.api.models.enums.SignatureType;
 import io.mersel.dss.verify.api.models.enums.VerificationLevel;
 import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService;
+import io.mersel.dss.verify.api.services.notification.InvalidSignatureNotifier;
 import io.mersel.dss.verify.api.services.util.EcdsaXmlSignaturePreprocessor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,6 +42,24 @@ public class SignatureVerificationService {
 
     @Autowired
     private EcdsaXmlSignaturePreprocessor ecdsaXmlSignaturePreprocessor;
+
+    /**
+     * INVALID imzalarda async webhook/Slack bildirim göndericisi.
+     *
+     * <p><strong>Niçin {@code required=false}</strong>: Bu service şu an
+     * direkt bir controller'a bağlı değil ({@code UnifiedVerificationController}
+     * yalnız {@link AdvancedSignatureVerificationService}'i kullanır); ancak
+     * gelecekte (örn. lite endpoint, batch API) buraya da bir endpoint
+     * bağlanırsa bildirim akışı <em>otomatik olarak</em> aktif olsun
+     * istiyoruz. Defensive integration: notifier bean'i yoksa
+     * (test slice / context açıkça hariç tutmuş) doğrulama yine çalışır.</p>
+     *
+     * <p>{@link AdvancedSignatureVerificationService} ile <strong>aynı
+     * davranış sözleşmesi</strong> — best-effort, async, üç-katmanlı
+     * try/catch defense (verifier akışı bildirim hatasından etkilenmez).</p>
+     */
+    @Autowired(required = false)
+    private InvalidSignatureNotifier invalidSignatureNotifier;
 
     /**
      * İmzalı dokümanı doğrular
@@ -93,6 +112,44 @@ public class SignatureVerificationService {
             VerificationResult result = parseVerificationResult(simpleReport, validator, level);
 
             logger.info("Signature verification completed. Valid: {}", result.isValid());
+
+            // INVALID ise konfigüre edilmiş kanallara async bildirim gönder.
+            // AdvancedSignatureVerificationService ile AYNI pattern, AYNI
+            // 3-katmanlı defense: notifier kendi içinde outer try/catch
+            // (her dispatch kanalı izole), burada ikinci try/catch
+            // (Throwable yakalıyor — son perde), originalDocument.getBytes()
+            // ayrı try/catch (temp-file IO hatası bildirim akışını
+            // kıramasın). signedBytes ECDSA preprocessor sonrası halini
+            // taşır (imza üreticisinin yolladığı orijinal değil); receiver
+            // forensik analiz için sha256Hex + size üzerinden eşleştirebilir.
+            try {
+                if (invalidSignatureNotifier != null) {
+                    byte[] originalBytes = null;
+                    String originalFileName = null;
+                    if (originalDocument != null && !originalDocument.isEmpty()) {
+                        try {
+                            originalBytes = originalDocument.getBytes();
+                            originalFileName = originalDocument.getOriginalFilename();
+                        } catch (Exception readEx) {
+                            logger.warn("Notifier için originalDocument byte'ları okunamadı "
+                                            + "(bildirim originalDocument alanı olmadan gönderilecek): {}",
+                                    readEx.getMessage());
+                        }
+                    }
+                    invalidSignatureNotifier.notifyIfInvalid(
+                            result,
+                            signedBytes,
+                            signedDocument != null ? signedDocument.getOriginalFilename() : null,
+                            signedDocument != null ? signedDocument.getContentType() : null,
+                            originalBytes,
+                            originalFileName);
+                }
+            } catch (Throwable notifyEx) {
+                // Throwable yakalıyoruz — verifier akışının son perdesi.
+                logger.warn("Invalid signature notification dispatch failed (yok sayıldı): {}",
+                        notifyEx.toString());
+            }
+
             return result;
 
         } catch (Exception e) {

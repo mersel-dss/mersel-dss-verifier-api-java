@@ -40,6 +40,29 @@ services:
       # Default: true (KamuSM/GIB ecosystem parity with TUBITAK Imzager).
       # Set to false for strict eIDAS-QES behavior.
       - TR_LEGACY_XADES_TOLERANCE=${TR_LEGACY_XADES_TOLERANCE:-true}
+
+      # ===================================================================
+      # INVALID Signature Notifications (webhook + Slack)
+      # ===================================================================
+      # Tum env var'lar OPSIYONEL. Set edilmediginde notifier no-op'tur,
+      # OkHttpClient bile yaratilmaz (gercek zero-overhead). Birini set
+      # ederek istediginiz kanali aciyorsunuz. Tam dokumantasyon icin:
+      # docs/notifications/HOW_TO_USE.md
+      - INVALID_SIGNATURE_NOTIFICATION_ENABLED=${INVALID_SIGNATURE_NOTIFICATION_ENABLED:-true}
+      # Generic webhook (operatorun kendi alert/ticket/audit sistemi):
+      - INVALID_SIGNATURE_WEBHOOK_URL=${INVALID_SIGNATURE_WEBHOOK_URL:-}
+      - INVALID_SIGNATURE_WEBHOOK_SECRET=${INVALID_SIGNATURE_WEBHOOK_SECRET:-}
+      # Slack incoming webhook (kirmizi bantli alarm mesaji):
+      - INVALID_SIGNATURE_SLACK_WEBHOOK_URL=${INVALID_SIGNATURE_SLACK_WEBHOOK_URL:-}
+      # Slack bot file upload (250KB+ tipik fatura icin ONERILEN):
+      - INVALID_SIGNATURE_SLACK_BOT_TOKEN=${INVALID_SIGNATURE_SLACK_BOT_TOKEN:-}
+      - INVALID_SIGNATURE_SLACK_CHANNEL=${INVALID_SIGNATURE_SLACK_CHANNEL:-}
+      # Slack-only inline base64 (sadece <=8KB dosyalar icin opt-in):
+      - INVALID_SIGNATURE_SLACK_INLINE_BASE64_ENABLED=${INVALID_SIGNATURE_SLACK_INLINE_BASE64_ENABLED:-false}
+      - INVALID_SIGNATURE_SLACK_INLINE_BASE64_MAX_BYTES=${INVALID_SIGNATURE_SLACK_INLINE_BASE64_MAX_BYTES:-8192}
+      # Gizlilik (PII/Mali Muhur): false yaparsan base64 webhook'a gitmez.
+      - INVALID_SIGNATURE_NOTIFICATION_INCLUDE_CONTENT=${INVALID_SIGNATURE_NOTIFICATION_INCLUDE_CONTENT:-true}
+      - INVALID_SIGNATURE_NOTIFICATION_MAX_CONTENT_SIZE_BYTES=${INVALID_SIGNATURE_NOTIFICATION_MAX_CONTENT_SIZE_BYTES:-10485760}
     volumes:
       # Mount test documents (development)
       - ../../resources/test-documents:/app/test-documents:ro

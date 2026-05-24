@@ -8,6 +8,198 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 ## [Unreleased]
 
 ### Added
+- **INVALID imza bildirim altyapisi (webhook + Slack mesaj + Slack dosya
+  upload + HMAC imza)**: Bir imza dogrulama sonucu `INVALID` oldugunda
+  konfigure edilmis hedeflere <em>async, best-effort, fire-and-forget</em>
+  bildirim gondererek mukellef tarafinin saatlerce sonra fark ettigi
+  Mali Muhur anomalilerini saniyeler icinde alarm kanalina dusurur.
+  Tum kanallar bagimsiz aktivasyona sahip; sifirli env durumunda heap/IO
+  maliyeti tamamen sifirdir. Yerlesik bulut cozumlerinin UI bildirimi +
+  gunluk cron rapor modelinin <strong>aksine</strong> olay-tabanli
+  push-arkitektur.
+  - Yeni paket: `services/notification` — `InvalidSignatureNotifier`
+    orkestrator, `SlackFileUploader` 3-adimli Slack file API sarmali,
+    `InvalidSignatureWebhookPayload` JSON schema (`event` / `source` /
+    `notificationTime` / `file{name,sizeBytes,contentType,sha256Hex,
+    base64Content,contentOmittedReason}` / `originalDocument` /
+    `result`).
+  - Yeni konfigurasyon: `config/InvalidSignatureNotificationConfiguration`
+    (env-driven, tek env var ile aktivasyon prensibi — operator URL set
+    eder etmez kanal acilir).
+  - **Generic webhook kanali** — operatorun kendi alert/ticket/audit
+    sistemine JSON POST. Payload `result` alaninda **DSS dogrulama
+    sonucunun tamami** (signatures, certificateChain, validationDetails,
+    appliedRejections, appliedSuppressions) gomulur — receiver ayri bir
+    kisaltma kontrati parse etmek zorunda degildir. Dogrulanan dosya
+    base64 olarak `file.base64Content` icine, dosyanin SHA-256 hash'i
+    `file.sha256Hex` icine gomulur (icerik <em>opsiyonel</em>, hash
+    her zaman).
+  - **Slack incoming webhook kanali** — Slack kanalinda Block Kit
+    formatinda zenginlestirilmis alarm mesaji. Mesaj `attachments`
+    legacy field'i icine gomulur (`color: "#A30200"`) — boylece mesajin
+    sol kenarinda <strong>kirmizi dikey serit</strong> olusur, INVALID
+    alarmi bir bakista ayirt edilir. Block Kit kendi basina renk
+    desteklemediginden Slack'in danger sinyallemesi icin tek desteklenen
+    yol budur. Icerik: header + summary fields (dosya/status/imza tipi/
+    sayi) + hata listesi (max 5, kalanlar ozetlenir) + per-signature
+    blok (indication / subIndication / imzaci CN + Mersel rejection
+    kodu). Base64 icerik chat kanalina ASLA gitmez.
+  - **Slack bot file upload kanali** — alarm mesajina ek olarak
+    dogrulanan dosyayi Slack kanalina <strong>indirilebilir ek</strong>
+    olarak yukler. Slack `files.upload` Kasim 2025'te sunset edildigi
+    icin yeni zorunlu 3-adimli flow kullanilir:
+    `files.getUploadURLExternal` → upload_url'e raw byte POST →
+    `files.completeUploadExternal`. Hem `INVALID_SIGNATURE_SLACK_BOT_TOKEN`
+    (xoxb-… Bot User OAuth Token, scope: `files:write`) hem
+    `INVALID_SIGNATURE_SLACK_CHANNEL` (kanal ADI degil ID, `C0123…`
+    formati) set edilmedikce upload tetiklenmez. Dosya
+    `MAX_CONTENT_SIZE_BYTES` esigini aliyorsa upload atlanir; webhook
+    payload zaten metadata + omittedReason tasidigindan veri kaybi yok.
+  - **Slack-only / single-URL dagitim modu — inline base64** — Operatorun
+    Slack uygulamasi + bot token + `files:write` scope yonetmek
+    istemedigi/kuramayacagi senaryolar icin (kurumsal IT politikasi,
+    hizli POC, kucuk ekip): dogrulanan dosya Slack chat mesajinin ICINE
+    base64 + triple-backtick code block olarak gomulur. Boylece operator
+    yalniz tek bir Slack incoming webhook URL'i set eder, harici depo
+    veya bot/scope kurulumu gerekmez — pazardaki yerlesik cozumlerin
+    "linke tikla, login ol, dosyayi indir" akisindan farkli olarak
+    dosya tam Slack mesajinin icinde, **chat'ten cikmadan**. Davranis:
+    - **Opt-in**, default `false`. Operator bilincli olarak
+      `INVALID_SIGNATURE_SLACK_INLINE_BASE64_ENABLED=true` yapmadikca
+      Slack mesaji sade kalir (chat'i base64 ile kirletme riski yok).
+    - **Default 8KB boyut sinir**i — base64 expansion 4/3x ile 8KB
+      binary ≈ 10.9KB string; Slack mesaj toplam 40KB sinirin altinda
+      rahatca yasar. Sinir asilirsa inline atlanir; mesajda "boyut
+      limit asildi" notice satiri belirir (sessiz drop YOK).
+    - **Otomatik chunk**ing — Block Kit per-section text limiti 3000
+      char (toplam 40KB sinirindan ONCE vuran constraint).
+      `chunkForSlackSection()` static helper'i base64 string'i ~2700
+      char'lik parcalara boler ve birden fazla section block'a basar.
+      8KB icin ~5 blok; Block Kit per-message 50 blok izninin cok
+      altinda. Round-trip garantisi: `String.join("", chunks)` her
+      zaman orijinal base64'e esit — tek char drift bile dosyayi
+      bozar, dedicated test ile korunur.
+    - **Bot upload'dan bagimsiz** — iki kanal ayni anda da set
+      edilebilir (ikisi de tetiklenir, kanallar birbirini bastirmaz).
+      Operator trade-off'u: bot upload daha kaliteli UX
+      (gercek download'lanabilir dosya), inline base64 ise tek URL'le
+      ayakta kalir.
+    - **Alici tarafi decode** — mesajdaki code block icerigini secip
+      `pbpaste | base64 -d > signed.bin` (macOS) veya
+      `xclip -o | base64 -d > signed.bin` (Linux); multi-chunk
+      durumunda tum code block'lar concat edilip ayni komuta verilir.
+  - **HMAC webhook imzasi (kaynak dogrulama)** —
+    `INVALID_SIGNATURE_WEBHOOK_SECRET` set edilirse her generic webhook
+    POST'una su header'lar eklenir (kararli API kontrati):
+    - `X-Mersel-Event: invalid-signature` — event tipi
+    - `X-Mersel-Webhook-Id: <uuid>` — her delivery icin essiz (receiver
+      idempotency icin)
+    - `X-Mersel-Webhook-Timestamp: <unix-epoch-seconds>` — replay
+      protection
+    - `X-Mersel-Signature: sha256=<hex>` —
+      HMAC-SHA256(`"<timestamp>.<rawBody>"`, secret) lowercase hex
+    
+    Signing string'e timestamp dahil etmek (Stripe-style) sadece body
+    imzalamak yerine replay vektorunu kapatir. Receiver tarafinda
+    constant-time karsilastirma ZORUNLU (timingSafeEqual / MessageDigest.isEqual);
+    `==` veya `equals()` timing saldirilarina acik. Slack incoming
+    webhook icin HMAC YOK — Slack URL'in kendisi resmi secret
+    modelidir; HMAC header'i Slack tarafinda parse edilemez. Slack bot
+    token zaten kendi auth katmanini saglar.
+  - **Best-effort + async + defense-in-depth** — Tum kanallar OkHttp
+    `Call.enqueue()` ile arka plana atilir; verifier thread'i HTTP'yi
+    beklemez. Bildirim hatasi dogrulama akisini ASLA bozmaz, asla
+    `valid` field'ini etkilemez. UC KATMAN exception kalkani:
+    1. `AdvancedSignatureVerificationService` <strong>VE</strong>
+       `SignatureVerificationService` (lite verifier) — her ikisinde
+       de `notifyIfInvalid()` cagrisi `Throwable` catch'iyle saril
+       (verifier'in son perdesi); ayrica `originalDocument.getBytes()`
+       ayri try/catch'te (temp-file IO hatasinda bildirim signedBytes
+       ile yine gider). Lite verifier'a entegrasyon defansif:
+       `UnifiedVerificationController` su an yalniz advanced verifier'i
+       kullaniyor, ama gelecekte lite endpoint baglanirsa bildirim
+       <em>otomatik</em> aktif olur — sessiz kaybolan INVALID notification
+       riski yok.
+    2. `InvalidSignatureNotifier.notifyIfInvalid()` outer `Throwable`
+       catch + her dispatch kanali (webhook / Slack mesaj / Slack file
+       upload) <strong>bagimsiz</strong> try/catch'te — birinin patlamasi
+       digerini engellemez (operator izolasyon talep ediyor).
+    3. OkHttp callback'lerinde `onResponse` ve `onFailure` ayri ayri
+       `Throwable` catch; SlackFileUploader'in 3 step'inde Request build
+       + JSON parse ayri guard'larla; HMAC hesabi `null` doner
+       (header silinir, throw etmez).
+    
+    Receiver 500/timeout/yanlis URL/malformed apiBase/connection refused
+    hepsi WARN log + akis devam. Retry yok (idempotency receiver
+    tarafinda); cunku dogrulama bir kez yapildi, bildirim ikinci sinif
+    audit kanali.
+  - **Lazy OkHttpClient init — gercek zero-overhead** — Onceki
+    implementasyon @PostConstruct'ta KOSULSUZ bir OkHttpClient kurar,
+    dispatcher thread pool + connection pool yaratirdi (URL set
+    edilmemis olsa bile ~birkac MB heap + 2-3 idle thread yasardi).
+    Yeni davranis: `config.isEnabled()` false VEYA
+    `config.hasAnyDestination()` false ise OkHttpClient YARATILMAZ;
+    `httpClient` null kalir, "zero-overhead" iddasi gercek anlamiyla
+    tutulur. `fireWebhookPost` ve `fireSimplePost` metodlarinda null
+    guard'lar var — runtime'da config setter ile destination set
+    edilse ama bean refresh atlansa bile NPE atmaz, WARN log + sus
+    + verifier akisi temiz.
+  - **Gizlilik kontrolu** — `INCLUDE_CONTENT=false` ile base64 icerik
+    payload'dan dusurulebilir; SHA-256 hash yine gider, dolayisiyla
+    receiver dosyayi kendi arsivinden eslestirebilir. Dosya
+    `MAX_CONTENT_SIZE_BYTES` (default 10MB) ustundeyse otomatik atlanir
+    ve `contentOmittedReason` alanina (`EXCLUDED_BY_CONFIG` veya
+    `EXCEEDED_MAX_SIZE`) yazilir — receiver "icerik gelmedi, neden?"
+    sorusunun cevabini payload'dan goruyor.
+  - 13 yeni env var (hepsi opsiyonel, default'lar `application.properties`
+    icinde yorumlu): `INVALID_SIGNATURE_NOTIFICATION_ENABLED`,
+    `INVALID_SIGNATURE_WEBHOOK_URL`, `INVALID_SIGNATURE_WEBHOOK_SECRET`,
+    `INVALID_SIGNATURE_SLACK_WEBHOOK_URL`,
+    `INVALID_SIGNATURE_SLACK_BOT_TOKEN`, `INVALID_SIGNATURE_SLACK_CHANNEL`,
+    `INVALID_SIGNATURE_SLACK_INLINE_BASE64_ENABLED`,
+    `INVALID_SIGNATURE_SLACK_INLINE_BASE64_MAX_BYTES`,
+    `INVALID_SIGNATURE_NOTIFICATION_INCLUDE_CONTENT`,
+    `INVALID_SIGNATURE_NOTIFICATION_MAX_CONTENT_SIZE_BYTES`,
+    `INVALID_SIGNATURE_NOTIFICATION_CONNECT_TIMEOUT_MS`,
+    `INVALID_SIGNATURE_NOTIFICATION_READ_TIMEOUT_MS`.
+  - Yeni test bagimliligi (sadece test scope):
+    `okhttp3:mockwebserver:4.2.2` — InvalidSignatureNotifier ve
+    SlackFileUploader'in 3-adimli akisini in-process gercek bir TCP
+    server'la birebir dogrular; HTTP davranisi mock'lanmadi, asil
+    OkHttp pipeline'i kullanildi.
+  - 36 yeni unit test (`InvalidSignatureNotifierTest`): gate
+    davranislari (null/VALID/disabled/no-destination), generic webhook
+    full payload + base64 content + sha256 hex, `includeContent=false`
+    + `maxSize` override'lari, detached imza icin `originalDocument`
+    alani, receiver 500 + malformed URL toleransi, Slack `attachments`
+    color sidebar + Block Kit format + base64 sizmamasi, Slack hata
+    listesi truncation, per-signature Mersel rejection kodlari, HMAC
+    header'larinin secret olmadan/varken davranisi, HMAC'in body ve
+    timestamp degisikliklerine duyarliligi, blank secret guvenligi,
+    payload.result alaninin tum `VerificationResult` JSON kontrati,
+    Slack 3-step file upload end-to-end (getUploadURLExternal → CDN
+    binary POST → completeUploadExternal), file upload boyut sinirinda
+    atlanma davranisi, Slack step 1 `ok:false` durumunda zincir
+    kesilmesi. <strong>Slack inline base64 (Slack-only mod) testleri</strong>:
+    default opt-out (chat kirletmeme), opt-in tek-chunk roundtrip,
+    8KB icerigin coklu Block Kit section'larina chunk'lanmasi (her
+    section ≤2900 char + drift'siz reassemble + decode roundtrip
+    orijinal byte'lara dogru donus), boyut cap'i asildiginda
+    omission notice + decode hint suppression, MockWebServer
+    uzerinden end-to-end transfer.
+    <strong>Defense-in-depth/async sozlesme testleri</strong>:
+    malformed webhook URL, tum hedeflerin patolojik olmasi, bozuk
+    serializer, receiver hang (caller HTTP'yi beklemiyor: elapsed <1s),
+    async tetikleme (receiver 800ms delay'lerken caller <500ms doner),
+    kanal izolasyonu (webhook patladiginda Slack yine tetikleniyor).
+    <strong>Lazy init + null guard testleri</strong>: destination
+    yokken OkHttpClient kurulmamasi, feature disabled iken aynisi,
+    runtime config degisiminde null httpClient'a karsi NPE'siz davranis.
+  - Yeni dokumantasyon: `docs/notifications/HOW_TO_USE.md` — operator
+    rehberi (aktivasyon matrisi, webhook payload semasi, Node.js/Python/
+    Java icin HMAC verification ornekleri, Slack bot kurulum adimlari,
+    sorun giderme tablosu, pazardaki yerlesik cozumlere kiyas).
+
 - **AIA (Authority Information Access) normalizing + caching katmani**:
   Eimzatr ekosistemindeki bazi ESHS'ler (ornek
   `http://depo.e-imzatriptal.com/sertifika/neshs-v3.cer`) ara CA sertifikasini
@@ -140,6 +332,20 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
     rejection klasorune cross-reference notu eklendi.
 
 ### Changed
+- **`SignatureVerificationService` (lite verifier) — INVALID
+  bildirim entegrasyonu eklendi**: Onceden yalniz
+  `AdvancedSignatureVerificationService` notifier'a baglanmisti;
+  `SignatureVerificationService` da `INVALID` doneriyordu ama
+  bildirim sessizce atlaniyordu. `UnifiedVerificationController` su
+  an yalniz advanced verifier'i kullandigi icin production'da sorun
+  degildi, ama gelecekte birisi lite verifier'i bir endpoint'e
+  baglarsa bildirim akisinin <em>otomatik</em> aktif olmasi icin
+  defansif integration eklendi. Ayni 3-katmanli try/catch pattern:
+  `@Autowired(required=false)` (bean yoksa verifier yine calisir),
+  `Throwable` outer catch (verifier'in son perdesi),
+  `originalDocument.getBytes()` ayri try/catch (temp-file IO
+  izolasyonu).
+
 - **`AdvancedSignatureVerificationService.processSignature(...)` —
   TR-ozel patoloji degerlendirmesi tekleştirildi**: gate kontrolu ve
   detector cagrisi tek bir noktada yapiliyor; sonuc (anomaly objesi) iki
