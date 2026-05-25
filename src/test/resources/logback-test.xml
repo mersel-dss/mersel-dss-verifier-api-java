@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!--
+        Production parity: aynı %xLogHeaders converter test'lerde de aktif olmalı
+        ki integration test'ler request-scoped MDC propagation'ı gerçek formatta
+        gözleyebilsin. logback-test.xml classpath'te logback-spring.xml'i
+        override eder, o yüzden converter'ı burada da kaydetmek gerek.
+    -->
+    <conversionRule conversionWord="xLogHeaders"
+                    converterClass="io.mersel.dss.verify.api.config.LogHeadersConverter"/>
+
+    <!-- Test ortamı için basit console logging -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg %xLogHeaders%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Test sırasında sadece WARN ve üzeri logla -->
+    <root level="WARN">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+
+    <!-- Kendi paketimiz için DEBUG -->
+    <logger name="io.mersel.dss.verify.api" level="DEBUG"/>
+</configuration>

@@ -161,11 +161,27 @@ curl -X POST http://localhost:8086/api/v1/verify/pades \
       "signatureId": "id-1234",
       "valid": true,
       "signatureFormat": "PAdES-BASELINE-B",
-      "signingTime": "2024-11-07T14:20:00Z"
+      "signingTime": "2024-11-07T14:20:00Z",
+      "signatureAlgorithm": "RSA_SHA256",
+      "digestAlgorithm": "SHA256"
     }
   ]
 }
 ```
+
+> **`signatureAlgorithm` vs `digestAlgorithm`:**
+> - `signatureAlgorithm` → İmzayı üreten kriptografik kompozit
+>   (encryption + digest). DSS `SignatureAlgorithm` enum sabit adı —
+>   örn. `RSA_SHA256`, `ECDSA_SHA384`, `RSA_SSA_PSS_SHA256`. Belgeyi
+>   imzacının nasıl imzaladığını söyler.
+> - `digestAlgorithm` → `ds:SignedInfo` özet algoritması — örn.
+>   `SHA256`. Belgenin nasıl özetlendiğini söyler; kriptografik politika
+>   denetimi (zayıf algoritma yasağı) için tek başına da yeterli.
+>
+> Bu iki alan SIMPLE ve COMPREHENSIVE modlarda eşit görünür ve
+> imzanın <em>kendisinin</em> algoritmasıdır — `signerCertificate.signatureAlgorithm`
+> ise CA'nın leaf sertifikayı hangi algoritmayla imzaladığını gösterir
+> (farklı kavram, karıştırılmamalı).
 
 **Örnek Response (Comprehensive):**
 ```json
@@ -180,6 +196,8 @@ curl -X POST http://localhost:8086/api/v1/verify/pades \
       "valid": true,
       "signatureFormat": "PAdES-BASELINE-LT",
       "signatureLevel": "PAdES-BASELINE-LT",
+      "signatureAlgorithm": "RSA_SHA256",
+      "digestAlgorithm": "SHA256",
       "signingTime": "2024-11-07T14:20:00Z",
       "claimedSigningTime": "2024-11-07T14:20:00Z",
       "signerCertificate": {

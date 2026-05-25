@@ -8,6 +8,86 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 ## [Unreleased]
 
 ### Added
+- **`x-log-*` request header'ları artık tüm log satırlarında JSON olarak
+  otomatik görünür — opt-in correlation/trace observability sözleşmesi.**
+  - **Motivasyon**: Operatör, çağıran sistemden gelen takip metadatasını
+    (örn. `X-Log-Id: abc`, `X-Log-Kimlik: kajsdh`) controller / service
+    kodunda elle parametre olarak taşımadan, GİB submission ID'si veya
+    müşteri tarafı correlation key'lerini doğrulama akışlarının (XAdES /
+    CAdES / PAdES verify, certificate inspection, vb.) info / warn / error
+    satırlarının hepsinde gözleyebilmeli. Manuel
+    `LOGGER.info("[{}]", traceId, ...)` pattern'i controller, ~servis ve
+    `GlobalExceptionHandler` arasında çoğaltılması anlamsız boilerplate
+    olurdu.
+  - **Mekanizma**: Yeni `LogHeadersFilter`
+    (`Ordered.HIGHEST_PRECEDENCE + 50`) request başında `x-log-` prefix'li
+    tüm header'ları (case-insensitive) yakalayıp SLF4J `MDC`'ye
+    `xlog.<lower-case-name>` formunda yazar; request bitince (exception
+    path dahil) sadece kendi yazdığı anahtarları temizler — başka kodun
+    MDC'sine dokunmaz. Yeni `LogHeadersConverter` Logback
+    `ClassicConverter`'ı pattern içinde `%xLogHeaders` olarak kayıtlı;
+    her log event'inde `xlog.*` MDC entry'lerini alfabetik sırada JSON
+    nesnesine serialize eder. Hiç header yoksa boş string döner — mevcut
+    log gürültüsü artmaz.
+  - **Çıktı formatı**: `xlog={"x-log-id":"abc","x-log-kimlik":"kajsdh"}`.
+    Konum: standart pattern'in sonunda (`%msg` sonrası, `%n` öncesi).
+    `logback-spring.xml` içindeki CONSOLE / `application.log` /
+    `error.log` / `verification.log` appender'larının hepsi yeni
+    pattern'i kullanır.
+  - **Güvenlik sertleştirmesi**: (a) request başına en fazla
+    20 `x-log-*` header işlenir — şişirilmiş header bombasına karşı
+    sınır; (b) her değer 512 karaktere kırpılır; (c) CR/LF + diğer
+    ASCII kontrol karakterleri boşluğa çevrilir — klasik CRLF log
+    injection vektörü kapatılır; (d) converter ikinci savunma hattı
+    olarak `<0x20` kontrol karakterlerini RFC 8259 JSON kaçışına uğratır.
+  - **Async sınırlama**: SLF4J MDC thread-local'dir; `@Async`
+    dispatch'lerinde context otomatik propagate olmaz.
+    `InvalidSignatureNotifier` gibi fire-and-forget async bildirim
+    yollarında correlation header'ı async task içinden görünmez (request
+    thread'inde sync atılan log'larda zaten görünür). Bu davranış
+    bilinçli — async pipeline'ın MDC kopyalamasını isteyen kullanıcı
+    explicit `MDC.getCopyOfContextMap()` taşımalı.
+  - **Geriye dönük uyumluluk**: Mevcut log analiz/parse araçları için
+    breaking değil — log satırının yapısı korunur, `xlog={...}` bloğu
+    sadece request thread'inde ve sadece `x-log-*` header gönderildiğinde
+    eklenir. Header gelmeyen istekler aynı çıktıyı üretir.
+  - Üç yeni test sınıfı: `LogHeadersFilterTest` (MDC propagation,
+    cleanup, CRLF sanitization, max headers / max value length, exception
+    cleanup), `LogHeadersConverterTest` (boş MDC, alfabetik sıralama,
+    JSON kaçışları), `LogHeadersEndToEndTest` (gerçek Logback pattern
+    içinden uçtan uca emisyon — INFO / WARN / ERROR seviyeleri ve
+    request-context dışı izolasyon).
+- **İmza doğrulama yanıtında kriptografik algoritma görünürlüğü
+  (`signatureAlgorithm` + `digestAlgorithm`)**: Daha önce
+  `SignatureInfo` modelinde bu iki alan tanımlıydı ancak servis
+  doldurmuyor, JSON'da hiç görünmüyordu — operatör "belge nasıl
+  özetlenmiş, nasıl imzalanmış?" sorusuna cevap için ya
+  COMPREHENSIVE moda geçip sertifikanın `signatureAlgorithm`'ına
+  bakıyor (yanlış; o CA→leaf algoritması) ya da DSS DetailedReport'u
+  manuel parse ediyordu. Artık her doğrulama yanıtında imzanın
+  kendisinin kompozit algoritması (örn. `RSA_SHA256`, `ECDSA_SHA384`)
+  ve `ds:SignedInfo` özet algoritması (örn. `SHA256`) tek bakışta
+  görünür.
+  - `AdvancedSignatureVerificationService.processSignatureWrapper`
+    DSS `SignatureWrapper.getSignatureAlgorithm()` /
+    `getDigestAlgorithm()` üzerinden iki alanı set eder; alanlar
+    SIMPLE ve COMPREHENSIVE modlarda eşit görünür (audit/kriptografik
+    politika kontrolü için seviye-bağımsız sözleşme).
+  - `signatureAlgorithm` DSS `SignatureAlgorithm` enum sabit adıyla
+    (`RSA_SHA256`) raporlanır — machine-readable, stabil. DiagnosticData
+    kompozit dönemediği nadir durumlarda encryption+digest enum'ları
+    birleştirilerek aynı formatta gösterilir (defansif fallback);
+    her ikisi de yoksa alan `null` kalır ve `@JsonInclude(NON_NULL)`
+    sayesinde JSON'a hiç düşmez (geriye dönük uyumluluk).
+  - `digestAlgorithm` DSS `DigestAlgorithm.getName()` ile insan-okur
+    formda (`SHA256`) raporlanır; aynı `NON_NULL` sözleşmesiyle
+    korunur.
+  - `SignatureInfo` üzerindeki bu iki alanın artık dış API
+    kontratının parçası olduğunu kayıt altına alan iki yeni
+    `SignatureInfoTest` testi eklendi (set→JSON round-trip + null
+    elision). Aktif kullanımda olmayan legacy `SignatureVerificationService`
+    bilinçli olarak değiştirilmedi (controller'a bağlı değil; ileride
+    aktive edilirse aynı blok oraya da taşınmalı).
 - **INVALID imza bildirim altyapisi (webhook + Slack mesaj + Slack dosya
   upload + HMAC imza)**: Bir imza dogrulama sonucu `INVALID` oldugunda
   konfigure edilmis hedeflere <em>async, best-effort, fire-and-forget</em>

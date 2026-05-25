@@ -113,4 +113,34 @@ class SignatureInfoTest {
         assertFalse(json.contains("chainRevocationStatus"),
                 "chainRevocationStatus null'sa JSON'a basilmamali: " + json);
     }
+
+    @Test
+    @DisplayName("JSON: signatureAlgorithm ve digestAlgorithm set ise JSON'a yazılır")
+    void jsonSerialization_writesAlgorithmFields() throws Exception {
+        SignatureInfo info = new SignatureInfo();
+        info.setSignatureId("test-sig-5");
+        info.setSignatureAlgorithm("RSA_SHA256");
+        info.setDigestAlgorithm("SHA256");
+
+        String json = mapper.writeValueAsString(info);
+
+        assertTrue(json.contains("\"signatureAlgorithm\":\"RSA_SHA256\""),
+                "signatureAlgorithm dış API kontratının parçası: " + json);
+        assertTrue(json.contains("\"digestAlgorithm\":\"SHA256\""),
+                "digestAlgorithm dış API kontratının parçası: " + json);
+    }
+
+    @Test
+    @DisplayName("JSON: algoritma alanları null ise JSON'a düşmez (NON_NULL)")
+    void jsonSerialization_omitsAlgorithmFieldsWhenNull() throws Exception {
+        SignatureInfo info = new SignatureInfo();
+        info.setSignatureId("test-sig-6");
+
+        String json = mapper.writeValueAsString(info);
+
+        assertFalse(json.contains("signatureAlgorithm"),
+                "signatureAlgorithm null'sa JSON'a basılmamalı: " + json);
+        assertFalse(json.contains("digestAlgorithm"),
+                "digestAlgorithm null'sa JSON'a basılmamalı: " + json);
+    }
 }

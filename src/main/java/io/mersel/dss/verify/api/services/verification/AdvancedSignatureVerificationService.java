@@ -9,7 +9,10 @@ import eu.europa.esig.dss.diagnostic.DiagnosticData;
 import eu.europa.esig.dss.diagnostic.SignatureWrapper;
 import eu.europa.esig.dss.diagnostic.CertificateWrapper;
 import eu.europa.esig.dss.diagnostic.TimestampWrapper;
+import eu.europa.esig.dss.enumerations.DigestAlgorithm;
+import eu.europa.esig.dss.enumerations.EncryptionAlgorithm;
 import eu.europa.esig.dss.enumerations.Indication;
+import eu.europa.esig.dss.enumerations.SignatureAlgorithm;
 import eu.europa.esig.dss.enumerations.SubIndication;
 import eu.europa.esig.dss.model.DSSDocument;
 import eu.europa.esig.dss.model.InMemoryDocument;
@@ -990,6 +993,43 @@ public class AdvancedSignatureVerificationService {
         // Signature level (XAdES-BES, XAdES-T, XAdES-A vb.)
         if (signatureWrapper.getSignatureFormat() != null) {
             sigInfo.setSignatureLevel(signatureWrapper.getSignatureFormat().toString());
+        }
+
+        // İmzayı üreten kriptografik algoritmalar — DSS DiagnosticData'dan
+        // doğrudan okunur. İki ayrı alan döneriz ki istemci "belge nasıl
+        // özetlenmiş + nasıl imzalanmış" sorusuna tek bakışta cevap alsın:
+        //
+        //   signatureAlgorithm  → encryption + digest kombinasyonu
+        //                          (örn. RSA_SHA256, ECDSA_SHA384). DSS
+        //                          {@link SignatureAlgorithm} enum sabit
+        //                          ismi — machine-readable, stabil API.
+        //   digestAlgorithm     → ds:SignedInfo'da kullanılan özet
+        //                          algoritması (örn. SHA256). Audit ve
+        //                          kriptografik politika kontrolleri için
+        //                          tek başına da gerekir.
+        //
+        // ÖNEMLİ: Buradaki signatureAlgorithm imzanın kendisinin
+        // algoritmasıdır (signer'ın belgeyi nasıl imzaladığı). Bu,
+        // {@link CertificateInfo#getSignatureAlgorithm()}'dan farklıdır —
+        // o sertifikayı CA'nın hangi algoritmayla imzaladığını söyler.
+        SignatureAlgorithm sigAlg = signatureWrapper.getSignatureAlgorithm();
+        if (sigAlg != null) {
+            sigInfo.setSignatureAlgorithm(sigAlg.name());
+        } else {
+            // Bazı eksik DiagnosticData kayıtlarında kompozit dönmeyebilir;
+            // bu durumda encryption + digest'i ayrı ayrı birleştirip kompakt
+            // bir gösterim üretiriz ("RSA_SHA256" formatı korunsun).
+            EncryptionAlgorithm enc = signatureWrapper.getEncryptionAlgorithm();
+            DigestAlgorithm dig = signatureWrapper.getDigestAlgorithm();
+            if (enc != null && dig != null) {
+                sigInfo.setSignatureAlgorithm(enc.name() + "_" + dig.name());
+            } else if (enc != null) {
+                sigInfo.setSignatureAlgorithm(enc.name());
+            }
+        }
+        DigestAlgorithm digestAlg = signatureWrapper.getDigestAlgorithm();
+        if (digestAlg != null) {
+            sigInfo.setDigestAlgorithm(digestAlg.getName());
         }
 
         // Sertifika bilgileri
