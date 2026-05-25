@@ -12,7 +12,7 @@
     </parent>
     <groupId>io.mersel.dss</groupId>
     <artifactId>mersel-dss-verify-api</artifactId>
-    <version>0.3.1</version>
+    <version>0.4.0</version>
     <name>mersel-dss-verify-api</name>
     <description>Mersel DSS Verify API - Türkiye e-imza standartlarına uygun dijital imza doğrulama servisi</description>
 

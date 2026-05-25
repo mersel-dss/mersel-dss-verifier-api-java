@@ -7,6 +7,8 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-25
+
 ### Added
 - **`x-log-*` request header'ları artık tüm log satırlarında JSON olarak
   otomatik görünür — opt-in correlation/trace observability sözleşmesi.**
