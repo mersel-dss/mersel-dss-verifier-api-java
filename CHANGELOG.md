@@ -7,6 +7,106 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+### Added
+- **`.NET / NuGet istemci SDK'sı: `MERSEL.Services.DssVerifier.Client`** —
+  Verifier API'yi HTTP üzerinden tüketen, tek satır DI kaydıyla
+  uygulamaya entegre olabilen resmi .NET istemcisi
+  (`clients/dotnet-client/`).
+  - **Motivasyon**: Türkiye'deki muhasebe / mali müşavir / ön muhasebe
+    yazılım evlerinin önemli bir kısmı .NET ekosisteminde — klasik
+    .NET Framework 4.6.1+ on-prem WinForms/WPF kurulumlarından, modern
+    ASP.NET Core 8 bulut backend'lerine kadar. Bu kullanıcıların imza
+    doğrulama akışlarını entegre etmesi için iki yol vardı: (a) ham
+    `HttpClient` ile multipart isteklerini elle inşa etmek (her
+    upgrade'de breaking pattern, model evrimi izlenemiyor); (b) Swagger
+    Codegen ile otomatik istemci üretmek (jenerik, idiomatic değil,
+    Türkiye-spesifik `MDSS-*` suppression/rejection alanlarının
+    semantiği üreticinin elinde kayboluyor). Resmi tipli SDK ile her
+    iki problemi de çözüyoruz: response sözleşmesi (`SignatureInfo`,
+    `AppliedSuppression`, `AppliedRejection`, `ChainRevocationStatus`)
+    Java tarafıyla 1:1 senkron, evrim API kontratıyla koordineli.
+  - **TFM stratejisi — `netstandard2.0` + `net8.0`**: Sahadaki tüm
+    runtime'ları kapsamak ve modern LTS'in optimizasyonlarını birlikte
+    sunmak için iki-hedefli paket. `netstandard2.0` ile yakalananlar:
+    .NET Framework 4.6.1+, .NET Core 2.x/3.x, .NET 5/6/7/9, Mono 5.4+,
+    Xamarin (iOS / Android / Mac), Unity 2018.1+. `net8.0` ile modern
+    runtime'lar source-gen JSON, JIT iyileştirmeleri ve HTTP/2 keep-alive
+    optimizasyonlu özel asset alır. Ara TFM'lere (net6/7/9) gerek yok —
+    netstandard2.0 hepsini zaten karşılıyor; ekstra hedef yalnız paket
+    boyutunu büyütür ve CI matrix'ini şişirir. Pazardaki yerleşik
+    rakiplerin SDK'larının çoğu yalnız `netstandard2.1` ya da `net6+`
+    veriyor; bu, klasik .NET Framework 4.7/4.8 entegrasyonlarında "REST'i
+    elle çağır" denilmesine yol açıyor — biz sahada bu engeli kaldırdık.
+  - **Mimari**: Aggregator pattern + `IHttpClientFactory`. Tüketici
+    tarafta birleşik `IDssVerifierClient` cephesinin yanı sıra
+    `ISignatureVerifier`, `ITimestampVerifier`, `IHealthClient`
+    sub-interface'leri bağımsız inject edilebilir (slim consumer ihtiyacı
+    için). Tüm sub-client'lar tek bir named `HttpClient`
+    (`DssVerifierClientOptions.HttpClientName`) paylaşır — `Polly`,
+    `AddHttpMessageHandler`, gateway auth header'ları gibi cross-cutting
+    eklentiler tek noktadan zincire eklenebilir. Sunucu auth uygulamaz
+    (internal / gateway-arkası mimari); kullanıcı extra header'larını
+    standart `IHttpClientBuilder.ConfigureHttpClient` zinciri ile ekler.
+  - **DI kaydı — üç overload**: (a) `AddDssVerifierClient(IConfiguration,
+    sectionName)` — `appsettings.json` (`Services:DssVerifier` default
+    section) bağlama; (b) `AddDssVerifierClient(Action<Options>)` — kod
+    ile yapılandırma; (c) `AddDssVerifierClient(string baseUrl)` — hızlı
+    yol. `Options.Validate(...)` ile `BaseUrl` boş bırakılırsa DI build
+    aşamasında fail-fast.
+  - **Endpoint kapsamı**: `POST /api/v1/verify/signature` (XAdES /
+    PAdES / CAdES tek API — sunucu format kararını içeriği inceleyerek
+    verir; istemci tarafında ayrım gerekmez), `POST /api/v1/verify/timestamp`
+    (standalone RFC 3161), `GET /api/v1/health`, `GET /api/v1/info`.
+    Detached imza akışları için `VerifyDetachedAsync(signed, original)`
+    kısa-yol overload'ı.
+  - **`MDSS-*` kataloğunun tipli expose'u**: `Models/Enums/SuppressionCode`
+    ve `RejectionCode` enum'ları Java tarafındaki kararlı kod kataloğunu
+    birebir yansıtır. `Extensions.GetCode()` ile enum→kanonik kod string
+    dönüşümü (`MDSS_XADES_LEGACY_TR_TYPE_URI` → `MDSS-XADES-LEGACY-TR-TYPE-URI`),
+    `TryParse(string)` ile wire format → enum dönüşümü; bilinmeyen kodlar
+    `null` döner (forward-compatible — yeni kod eklendikçe eski client
+    crash etmez, sadece `string Code` alanı dolu kalır). Bu, audit /
+    compliance / Prometheus metric label akışlarında "kod ile branch
+    etmek" senaryosunu net şekilde çözer.
+  - **Hata sözleşmesi — semantic ayrım**: İmza geçersiz çıkması bir HTTP
+    hatası **değildir** — sunucu HTTP 200 + `VerificationResult.Valid =
+    false` döner; çağıran kod bu alanı + `AppliedRejections` listesini
+    inceler. Yalnız transport / sunucu hataları (4xx/5xx) için
+    `DssVerifierApiException` fırlatılır; `ApiError` üzerinden sunucunun
+    yapılandırılmış `ErrorResponse` gövdesi (`error`, `message`,
+    `details`, `timestamp`, `path`) erişilebilir. `Internal/DssVerifierHttpBase`
+    içinde JSON parse heuristic'i Content-Type yokken bile gövdeyi
+    deşifre etmeye çalışır (defansif).
+  - **Multi-TFM uyumluluk detayları**: `await using` ve `CancellationToken`
+    almak isteyen `ReadAsStringAsync(ct)` / `ReadAsStreamAsync(ct)`
+    overload'ları `#if NET6_0_OR_GREATER` guard'ı ile koşullu; netstandard2.0
+    build'inde fallback `using` + parametre-yok varyantları kullanılır.
+    `ImplicitUsings` kapatıldı; `GlobalUsings.cs` tek noktada her iki TFM
+    için aynı namespace set'ini ilan eder — TFM'ler arası subtle import
+    kayması riski yok.
+  - **NuGet release otomasyonu — `.github/workflows/nuget.yml`**: Aynı
+    `v*` tag push'unda `release.yml` (JAR + SBOM + checksum) ve
+    `docker-publish.yml` ile **paralel** koşan, birbirinden bağımsız
+    workflow. Tag'i SemVer 2.0.0 olarak parse edip
+    `dotnet pack -p:Version=...` ile csproj'daki `0.0.0-dev` placeholder'ı
+    override eder; `-SNAPSHOT` reddedilir; `--skip-duplicate` ile re-run
+    idempotent. Manuel `workflow_dispatch` ile `dry_run` modu (artifact
+    üret, push etme) smoke test için açık. Çıktılar: `.nupkg` +
+    SourceLink + symbols (`.snupkg`) — NuGet'e push edilen paket her
+    zaman sunucu release tag'iyle senkron (`dotnet add package
+    MERSEL.Services.DssVerifier.Client --version 0.5.1` dediğinde aynı
+    sürümün Docker imajı + GitHub Release JAR'ı birebir eşleşir).
+    `setup-dotnet` sadece `8.0.x` SDK'yı kurar — Roslyn cross-targets ile
+    netstandard2.0 build'i için ayrıca SDK kurmaya gerek yok.
+  - **Build doğrulaması**: `dotnet build -c Release` her iki TFM için
+    de **0 warning, 0 error**; `dotnet pack` `lib/netstandard2.0/` +
+    `lib/net8.0/` asset'leri ile yaklaşık 80 KB `.nupkg` üretir
+    (sade payload, hızlı restore).
+  - **NuGet yayın ön koşulu**: Repo `Settings → Secrets → Actions`
+    altına `NUGET_API_KEY` secret'i ve `nuget` adında bir GitHub
+    environment (opsiyonel ama önerilir — production protection rule
+    için) tanımlanmalı.
+
 ## [0.4.0] - 2026-05-25
 
 ### Added

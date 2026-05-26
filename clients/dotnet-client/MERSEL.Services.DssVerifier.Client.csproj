@@ -1,0 +1,76 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      Hedef framework stratejisi: netstandard2.0 + net8.0
+      ─────────────────────────────────────────────────────────────────
+      netstandard2.0 ile sahadaki "eski tüfekleri" yakalıyoruz:
+        - .NET Framework 4.6.1, 4.6.2, 4.7.x, 4.8 (klasik on-prem Windows servisleri)
+        - .NET Core 2.0/2.1/2.2/3.x
+        - .NET 5 / 6 / 7 / 9 (cross-compat)
+        - Mono 5.4+, Xamarin (iOS, Android, Mac)
+        - Unity 2018.1+ scripting backends
+      net8.0 ile modern LTS'in optimizasyonlarını (Source-generated JsonContext
+      candidate, JIT iyileştirmeleri, native HTTP/2 keep-alive) doğrudan veriyoruz.
+
+      Aradaki ara TFM'leri (net6/7/9) bilinçli olarak çıkardık — netstandard2.0
+      onların hepsini zaten karşılıyor; ekstra TFM yalnız paket boyutunu büyütüyor
+      ve CI matrix'ini şişiriyor, faydası yok.
+    -->
+    <TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591;CS1591</NoWarn>
+
+    <RootNamespace>MERSEL.Services.DssVerifier.Client</RootNamespace>
+    <AssemblyName>MERSEL.Services.DssVerifier.Client</AssemblyName>
+
+    <PackageId>MERSEL.Services.DssVerifier.Client</PackageId>
+    <!--
+      Lokal pack için placeholder "0.0.0-dev" tutuluyor. Gerçek yayın
+      versiyonunu nuget.yml workflow'u Git tag'inden (v0.5.1 → 0.5.1)
+      'dotnet pack -p:Version=…' ile override eder; böylece NuGet'e push
+      edilen paket her zaman server release tag'iyle senkron çıkar.
+    -->
+    <Version>0.0.0-dev</Version>
+    <Authors>MERSEL</Authors>
+    <Company>MERSEL</Company>
+    <Product>MERSEL DSS Verifier API</Product>
+    <Description>MERSEL DSS Verifier API (Java) mikroservisini HTTP üzerinden çağıran istemci SDK'sı. XAdES (BES/EPES/T/C/X/XL/A), PAdES (B-B/B-T/B-LT/B-LTA) ve CAdES imza doğrulama; RFC 3161 zaman damgası doğrulama; sertifika zinciri ve revocation (OCSP/CRL) kontrolü; Türkiye'ye özgü XAdES suppression/rejection tanı kodları (MDSS-*) ile audit-ready doğrulama yanıtlarını tek satır DI kaydıyla uygulamanıza entegre edin. netstandard2.0 hedefi sayesinde .NET Framework 4.6.1+, .NET Core 2.x+, .NET 5/6/7/8/9, Mono ve Xamarin akışlarında çalışır.</Description>
+    <PackageTags>mersel;dss;verifier;verify;xades;cades;pades;timestamp;rfc3161;eIDAS;e-imza;e-fatura;ocsp;crl;client;sdk;netstandard</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/mersel-dss/mersel-dss-verifier-api-java</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/mersel-dss/mersel-dss-verifier-api-java</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <DebugType>portable</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!--
+    Microsoft.Extensions.* 8.0.x paketleri hem netstandard2.0 hem net8.0
+    asset'i barındırıyor; tek block ile cross-target ihtiyacımızı karşılıyor.
+    System.Text.Json 8.0.5 — inbox 6.x/7.x'teki advisory'leri eleyen patched
+    sürüm; netstandard2.0 build'i için de mecburi pin (eski hedeflerde inbox
+    sürümün bilinen güvenlik açıkları var).
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="8.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="8.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="8.0.0" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+</Project>

@@ -53,3 +53,12 @@ Thumbs.db
 *.wmv
 
 .vscode
+
+# .NET (clients/dotnet-client)
+clients/dotnet-client/bin/
+clients/dotnet-client/obj/
+clients/dotnet-client/**/bin/
+clients/dotnet-client/**/obj/
+nupkgs/
+*.nupkg
+*.snupkg
