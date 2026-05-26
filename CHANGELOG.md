@@ -7,6 +7,8 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-05-26
+
 ### Added
 - **INVALID imza bildirimleri `x-log-*` korelasyon header'larını taşıyor** —
   Request thread'inde `LogHeadersFilter`'ın MDC'ye koyduğu tüm `x-log-*`
