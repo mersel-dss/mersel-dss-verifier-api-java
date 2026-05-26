@@ -70,7 +70,53 @@ public enum RejectionCode {
                     + "post-signing tahrifata açık. ETSI EN 319 132-1 (XAdES-BES) "
                     + "iki referans zorunluluğuna aykırı; imza reddedildi.",
             "ERROR",
-            "https://github.com/mersel-dss/mersel-dss-verifier-api-java/blob/main/docs/rejections/MDSS-XADES-LEGACY-TR-MISSING-SP-REFERENCE.md");
+            "https://github.com/mersel-dss/mersel-dss-verifier-api-java/blob/main/docs/rejections/MDSS-XADES-LEGACY-TR-MISSING-SP-REFERENCE.md"),
+
+    /**
+     * İmzacı sertifikası, X.509 <code>KeyUsage</code> extension'ında imza
+     * için yetkilendirilmiş <em>hiçbir</em> bit taşımıyor. Belge bu cert ile
+     * imzalanmış olsa da CA cert'i imza amaçlı yayınlamamış; doğrulayıcı RFC
+     * 5280 §4.2.1.3 gereği reddetmek zorunda.
+     *
+     * <h4>Kabul edilebilir bit'ler (en az biri gerekir)</h4>
+     * <ul>
+     *   <li><code>digitalSignature</code> (bit 0) — sıradan imza</li>
+     *   <li><code>nonRepudiation</code> /
+     *       <code>contentCommitment</code> (bit 1) — inkâr edilemez imza;
+     *       Mali Mühür / e-Seal cert profili (ETSI EN 319 412-2 §4.3) için
+     *       zorunlu</li>
+     * </ul>
+     *
+     * <h4>Tipik tetikleyiciler (Türkiye production gözlemi)</h4>
+     * <ul>
+     *   <li>Aynı tüzel kişiye ait birden fazla cert (şifreleme + imza)
+     *       olduğunda entegratör yazılımının yanlış olanı pick etmesi.</li>
+     *   <li>KamuSM Mali Mühür CA'sından şifreleme amaçlı çıkan cert'in
+     *       imza için yeniden-kullanılması.</li>
+     * </ul>
+     *
+     * <h4>Güvenlik etkisi</h4>
+     * Kriptografik olarak imza matematik açıdan doğrulansa bile cert sahibi
+     * "bu imzayı atmaya CA tarafından yetkilendirilmemiştir". Hukuki açıdan
+     * bağlayıcı bir advanced electronic signature kabul edilemez; eIDAS
+     * QES paralelinde geçersiz.
+     *
+     * <p>Çözüm verifier tarafında değil, imzayı üreten entegratör/üretici
+     * tarafındadır: imzacı kuruluş <em>imza amaçlı</em> bir cert (KeyUsage'da
+     * <code>digitalSignature</code> veya <code>nonRepudiation</code> bit'i
+     * set) edinmeli ve onu kullanmalıdır.</p>
+     *
+     * @see io.mersel.dss.verify.api.services.verification.AdvancedSignatureVerificationService#evaluateSignerKeyUsageRejection
+     */
+    MDSS_XCV_SIGNER_KEY_USAGE_INSUFFICIENT(
+            "MDSS-XCV-SIGNER-KEY-USAGE-INSUFFICIENT",
+            "İmzacı sertifikası KeyUsage'da imza yetkisi taşımıyor",
+            "İmzacı sertifikasının X.509 KeyUsage extension'ında imza için "
+                    + "gerekli bit'lerden hiçbiri set değil (digitalSignature veya "
+                    + "nonRepudiation/contentCommitment bekleniyor). CA cert'i "
+                    + "imza amaçlı yayınlamamış; RFC 5280 §4.2.1.3 gereği reddedildi.",
+            "ERROR",
+            "https://github.com/mersel-dss/mersel-dss-verifier-api-java/blob/main/docs/rejections/MDSS-XCV-SIGNER-KEY-USAGE-INSUFFICIENT.md");
 
     private final String code;
     private final String title;

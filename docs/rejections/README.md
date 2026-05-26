@@ -52,6 +52,7 @@ Aynı kod hem suppression hem rejection olamaz; kod uzayı paylaşılır.
 | Kod | Severity | Kategori | Açıklama |
 |---|---|---|---|
 | [`MDSS-XADES-LEGACY-TR-MISSING-SP-REFERENCE`](./MDSS-XADES-LEGACY-TR-MISSING-SP-REFERENCE.md) | `ERROR` | XAdES | XAdES imza yalnızca bir `ds:Reference` taşıyor; `SignedProperties` imza kapsamına alınmamış. ETSI EN 319 132-1 iki referans zorunluluğuna aykırı; SignedProperties içindeki alanlar post-signing tahrifata açık. |
+| [`MDSS-XCV-SIGNER-KEY-USAGE-INSUFFICIENT`](./MDSS-XCV-SIGNER-KEY-USAGE-INSUFFICIENT.md) | `ERROR` | XCV | İmzacı sertifikasının `KeyUsage` extension'ı imza için yetkili bit (`digitalSignature` veya `nonRepudiation`) içermiyor. CA cert'i imza amaçlı yayınlamamış; RFC 5280 §4.2.1.3 ihlali. |
 
 ## Operasyonel kullanım
 

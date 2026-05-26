@@ -12,6 +12,7 @@ import eu.europa.esig.dss.diagnostic.TimestampWrapper;
 import eu.europa.esig.dss.enumerations.DigestAlgorithm;
 import eu.europa.esig.dss.enumerations.EncryptionAlgorithm;
 import eu.europa.esig.dss.enumerations.Indication;
+import eu.europa.esig.dss.enumerations.KeyUsageBit;
 import eu.europa.esig.dss.enumerations.SignatureAlgorithm;
 import eu.europa.esig.dss.enumerations.SubIndication;
 import eu.europa.esig.dss.model.DSSDocument;
@@ -656,7 +657,32 @@ public class AdvancedSignatureVerificationService {
                                 signatureId, indication, subIndication, trAnomaly)
                         : null;
         boolean trToleranceApplied = trSuppression != null;
-        boolean trRejectionApplied = trRejection != null;
+
+        // İmzacı sertifikası KeyUsage yeterliliği — RFC 5280 §4.2.1.3'e
+        // göre signer cert'in keyUsage extension'ı imza için en az bir
+        // bit (digitalSignature veya nonRepudiation) içermelidir. Default
+        // policy bu kuralı FAIL seviyesinde uyguluyor; bu metodda ek olarak
+        // Mersel kataloglu RejectionCode ile operatöre tanı bilgisi veriyoruz.
+        // Suppression varken (DSS INVALID → biz VALID override) bu rejection
+        // raporlanmaz — çünkü zaten gate yukarıda KeyUsage check'inden
+        // geçmiş demektir.
+        AppliedRejection keyUsageRejection =
+                (!trToleranceApplied)
+                        ? evaluateSignerKeyUsageRejection(
+                                signatureId, indication, subIndication, signatureWrapper)
+                        : null;
+
+        // Tüm tespit edilmiş rejection'ları biriktir. Birden fazla
+        // RejectionCode aynı imza için geçerli olabilir — örn. hem
+        // MISSING_SP_REFERENCE hem SIGNER_KEY_USAGE_INSUFFICIENT — operatör
+        // tek bakışta tüm patolojileri görsün.
+        List<AppliedRejection> appliedRejections = new ArrayList<>();
+        if (trRejection != null) {
+            appliedRejections.add(trRejection);
+        }
+        if (keyUsageRejection != null) {
+            appliedRejections.add(keyUsageRejection);
+        }
 
         if (trToleranceApplied) {
             // İmzayı PASSED'a yükselttik. SubIndication artık anlamsız —
@@ -666,12 +692,11 @@ public class AdvancedSignatureVerificationService {
                     new ArrayList<>(java.util.Collections.singletonList(trSuppression)));
             indication = Indication.TOTAL_PASSED;
             subIndication = null;
-        } else if (trRejectionApplied) {
+        } else if (!appliedRejections.isEmpty()) {
             // Verdict'i değiştirmiyoruz; sadece neden reddedildiğini Mersel
-            // tanı koduyla zenginleştiriyoruz. DSS'in INDETERMINATE/SIG_CONSTRAINTS_FAILURE
+            // tanı kodlarıyla zenginleştiriyoruz. DSS'in subIndication
             // çıktısı korunur.
-            sigInfo.setAppliedRejections(
-                    new ArrayList<>(java.util.Collections.singletonList(trRejection)));
+            sigInfo.setAppliedRejections(appliedRejections);
         }
 
         boolean isValid = indication == Indication.TOTAL_PASSED || indication == Indication.PASSED;
@@ -716,9 +741,10 @@ public class AdvancedSignatureVerificationService {
             sigInfo.setValidationDetails(details);
         }
 
-        // Hatalar ve uyarılar
+        // Hatalar ve uyarılar — appliedRejections boş bile olsa fonksiyon
+        // simpleReport hataları + subIndication detaylarını yazmaya devam eder.
         collectErrorsAndWarnings(sigInfo, simpleReport, detailedReport, signatureId,
-                trToleranceApplied, trSuppression, trRejection);
+                trToleranceApplied, trSuppression, appliedRejections);
 
         // STRICT VALIDATION: Kritik hata varsa geçersiz say. Tolerance varken
         // collectErrorsAndWarnings hata yerine warning ekler, dolayısıyla bu
@@ -878,6 +904,111 @@ public class AdvancedSignatureVerificationService {
     }
 
     /**
+     * İmzacı sertifikasının X.509 <code>KeyUsage</code> extension'ında imza
+     * için yetkilendirilmiş bir bit (<code>digitalSignature</code> veya
+     * <code>nonRepudiation</code>) bulunmaması durumunda Mersel kataloglu
+     * <strong>rejection enrichment</strong> üretir.
+     *
+     * <p>Verdict her zaman INVALID kalır — bu metod yalnızca tanı kanalıdır.
+     * Default policy (<code>kamusm-signer-strict</code> /
+     * <code>kamusm-strict</code>) zaten <code>KeyUsage Level="FAIL"</code>
+     * kuralı ile DSS verdict'inin INVALID/INDETERMINATE çıkmasını sağlar;
+     * bu metod o duruma operatör için kataloglu tanı kodu ekler. Eğer custom
+     * policy ile keyUsage WARN'a indirilmişse DSS imzayı yine VALID raporlar
+     * ve bu rejection üretilmez — bu beklenen davranıştır: operatör explicit
+     * olarak gevşek policy seçmiştir.</p>
+     *
+     * <p>Önkoşullar:</p>
+     * <ul>
+     *   <li>İmza valid değil (DSS VALID dediyse rejection üretme — keyUsage
+     *       zaten DSS tarafından kabul edilmiş demektir).</li>
+     *   <li>signerCert mevcut.</li>
+     *   <li>signerCert keyUsage'ında <code>digitalSignature</code> veya
+     *       <code>nonRepudiation</code> YOK.</li>
+     * </ul>
+     *
+     * @return rejection üretilecekse {@link AppliedRejection}; aksi halde
+     *         {@code null}.
+     */
+    private AppliedRejection evaluateSignerKeyUsageRejection(
+            String signatureId,
+            Indication indication,
+            SubIndication subIndication,
+            SignatureWrapper signatureWrapper) {
+
+        if (indication == Indication.TOTAL_PASSED || indication == Indication.PASSED) {
+            // DSS verdict zaten VALID — operatörün custom policy'sinde
+            // keyUsage gevşek demektir; rejection üretme.
+            return null;
+        }
+        if (signatureWrapper == null) {
+            return null;
+        }
+        CertificateWrapper signingCert = signatureWrapper.getSigningCertificate();
+        if (signingCert == null) {
+            return null;
+        }
+        List<KeyUsageBit> bits;
+        try {
+            bits = signingCert.getKeyUsages();
+        } catch (Exception e) {
+            logger.debug("KeyUsage extraction failed for cert (signatureId={}): {}",
+                    signatureId, e.getMessage());
+            return null;
+        }
+        if (bits == null || bits.isEmpty()) {
+            // KeyUsage hiç yok → RFC 5280 "any usage" — patoloji değil
+            return null;
+        }
+        boolean hasSigningBit = bits.contains(KeyUsageBit.DIGITAL_SIGNATURE)
+                || bits.contains(KeyUsageBit.NON_REPUDIATION);
+        if (hasSigningBit) {
+            return null;
+        }
+
+        // Patoloji teyitlendi: cert keyUsage var ama imza için yetkili bit yok.
+        RejectionCode rc = RejectionCode.MDSS_XCV_SIGNER_KEY_USAGE_INSUFFICIENT;
+
+        List<String> presentBits = new ArrayList<>();
+        for (KeyUsageBit b : bits) {
+            presentBits.add(b.getValue());
+        }
+        String cn = signingCert.getReadableCertificateName();
+        logger.warn("İmzacı sertifikası KeyUsage yetersiz (signatureId={}, code={}, cn=\"{}\"). "
+                        + "Mevcut bit'ler: {}; beklenenlerden biri: digitalSignature veya nonRepudiation.",
+                signatureId, rc.getCode(), cn, presentBits);
+
+        Map<String, Object> evidence = new LinkedHashMap<>();
+        evidence.put("presentKeyUsageBits", presentBits);
+        evidence.put("acceptedKeyUsageBits",
+                Arrays.asList(KeyUsageBit.DIGITAL_SIGNATURE.getValue(),
+                              KeyUsageBit.NON_REPUDIATION.getValue()));
+        evidence.put("signerCommonName", cn);
+        evidence.put("signerSerialNumber", signingCert.getSerialNumber());
+        evidence.put("standardReference",
+                "RFC 5280 §4.2.1.3; ETSI EN 319 412-2 §4.3 (e-Seal)");
+        evidence.put("remediation",
+                "İmzayı atan kuruluş, KamuSM/CA'dan imza-amaçlı (KeyUsage'da "
+                        + "digitalSignature veya nonRepudiation bit'i set) bir cert "
+                        + "edinmeli ve onu kullanmalıdır. Mevcut cert sadece "
+                        + "şifreleme/anahtar değişimi için yetkilendirilmiştir.");
+
+        // SubIndication null olabilir (custom policy edge case'leri); evidence'a
+        // string olarak güvenli şekilde yansıt.
+        String subInd = subIndication != null ? subIndication.name() : "UNSPECIFIED";
+
+        return new AppliedRejection(
+                rc.getCode(),
+                rc.getTitle(),
+                rc.getDefaultReason() + " Mevcut bit'ler: " + presentBits + ".",
+                rc.getSeverity(),
+                indication.name(),
+                subInd,
+                evidence,
+                rc.getDocsUrl());
+    }
+
+    /**
      * TR-özel XAdES patoloji değerlendirmesi için ortak ön-koşullar.
      * Hem {@link #evaluateTrLegacyXadesTolerance} hem
      * {@link #evaluateTrLegacyXadesRejection} bu gate'i geçmek zorunda;
@@ -912,7 +1043,75 @@ public class AdvancedSignatureVerificationService {
         if (originalXmlBytes == null || legacyTrXadesDetector == null) {
             return false;
         }
+        // Defense-in-depth: TR-özel Type URI suppression sadece SAV/SAV-katmanı
+        // tolerans için. Eğer signer cert'in X.509 KeyUsage'ı imza için
+        // yetkilendirilmemişse (yani CA cert'i imza amaçlı yayınlamamışsa)
+        // bu suppression devreye GİRMEMELİDİR — aksi halde RFC 5280 §4.2.1.3
+        // ihlali olan bir imza, yalnızca Type URI yazım hatası gerekçesiyle
+        // VALID'e yükseltilir ve "cert imza için yetkili değil" tanısı görünmez.
+        //
+        // Pratikte default policy XML'i KeyUsage Level="FAIL" olduğu için
+        // bu durumda DSS zaten subIndication=CHAIN_CONSTRAINTS_FAILURE üretir
+        // ve yukarıdaki gate (subIndication=SIG_CONSTRAINTS_FAILURE kontrolü)
+        // suppression'ı reddeder. Bu ek check yalnızca policy operator tarafından
+        // gevşetildiğinde (örn. custom dss.policy.path ile WARN'a alındığında)
+        // ikinci savunma katmanı olarak iş görür.
+        if (!hasAcceptableSigningKeyUsage(signatureWrapper.getSigningCertificate())) {
+            logger.info("TR XAdES Type URI suppression devre dışı (signatureId={}): "
+                    + "imzacı sertifikasının KeyUsage extension'ı imza için yetersiz "
+                    + "(digitalSignature/nonRepudiation bit'i yok). DSS kararı korunacak.",
+                    signatureId);
+            return false;
+        }
         return true;
+    }
+
+    /**
+     * Bir imzacı sertifikasının X.509 <code>KeyUsage</code> extension'ında
+     * imza için gerekli en az bir bit (<code>digitalSignature</code> veya
+     * <code>nonRepudiation</code>/contentCommitment) bulunup bulunmadığını
+     * kontrol eder.
+     *
+     * <p>RFC 5280 §4.2.1.3'e göre {@code keyUsage} extension'ı bir cert'in
+     * hangi kriptografik operasyonlar için yetkilendirildiğini sınırlar.
+     * İmza doğrulayan tarafın yapması gereken kontrol: cert sahibi public
+     * key, imza doğrulama operasyonu için kullanılacaksa
+     * <code>digitalSignature</code> veya <code>nonRepudiation</code>
+     * bit'lerinden EN AZ biri set olmalıdır. ETSI EN 319 412-2 §4.3
+     * (e-Seal / Mali Mühür) profilinde ayrıca <code>nonRepudiation</code>
+     * zorunluluğu vardır; biz daha gevşek davranıp her ikisinden birini
+     * yeterli sayıyoruz (legacy belge tabanı uyumluluğu için).</p>
+     *
+     * <p>Edge case'ler: cert {@code null} ise (timestamp-only validation
+     * gibi alışılmadık durumlar) {@code true} döneriz — bu metodun
+     * sorumluluğu cert varlığını kanıtlamak değil, varsa bit'i denetlemek.
+     * KeyUsage extension hiç yoksa da {@code true} döneriz; RFC 5280'e göre
+     * KeyUsage olmayan cert "any usage" anlamına gelir ve imza yapabilir.</p>
+     *
+     * @param signingCert DSS DiagnosticData'dan gelen imzacı cert wrapper'ı;
+     *                    {@code null} olabilir.
+     * @return cert'in keyUsage'ı imza yapmaya yetkiliyse veya keyUsage
+     *         hiç yoksa {@code true}; aksi halde {@code false}.
+     */
+    private boolean hasAcceptableSigningKeyUsage(CertificateWrapper signingCert) {
+        if (signingCert == null) {
+            return true;
+        }
+        List<KeyUsageBit> bits;
+        try {
+            bits = signingCert.getKeyUsages();
+        } catch (Exception e) {
+            // DSS modeli null/exception döndürebilir; defensive olarak kabul ediyoruz
+            // (extension yok varsayımı — RFC 5280 "any usage" semantiği).
+            logger.debug("KeyUsage extraction failed for cert: {}", e.getMessage());
+            return true;
+        }
+        if (bits == null || bits.isEmpty()) {
+            // KeyUsage extension hiç yok → RFC 5280 §4.2.1.3 "any usage"
+            return true;
+        }
+        return bits.contains(KeyUsageBit.DIGITAL_SIGNATURE)
+                || bits.contains(KeyUsageBit.NON_REPUDIATION);
     }
 
     /**
@@ -1227,11 +1426,13 @@ public class AdvancedSignatureVerificationService {
      *        validationWarnings'e taşırız.
      * @param trSuppression uygulanan suppression objesi (null olabilir).
      *        Warning metnindeki kod değerini bastırmak için.
-     * @param trRejection uygulanan rejection objesi (null olabilir). Verdict
-     *        değişmez; validationErrors içine kataloglu Mersel rejection
-     *        koduyla zenginleştirilmiş satır eklenir (operatör DSS jenerik
-     *        SIG_CONSTRAINTS_FAILURE'ından öte Türkiye-spesifik patolojiyi
-     *        tek bakışta görsün).
+     * @param appliedRejections uygulanan tüm rejection objeleri (boş olabilir).
+     *        Verdict değişmez; validationErrors içine her rejection için
+     *        kataloglu Mersel kodu ile zenginleştirilmiş satır eklenir
+     *        (operatör DSS jenerik SubIndication'ından öte Türkiye-spesifik
+     *        patolojileri tek bakışta görsün). Tek SubIndication birden fazla
+     *        patoloji tetiklemiş olabileceği için (örn. hem tek-referans hem
+     *        keyUsage) liste yapısı kullanılır.
      */
     private void collectErrorsAndWarnings(
             SignatureInfo sigInfo,
@@ -1240,7 +1441,7 @@ public class AdvancedSignatureVerificationService {
             String signatureId,
             boolean trToleranceApplied,
             AppliedSuppression trSuppression,
-            AppliedRejection trRejection) {
+            List<AppliedRejection> appliedRejections) {
 
         List<String> errors = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
@@ -1258,11 +1459,33 @@ public class AdvancedSignatureVerificationService {
             errors.add(errorMsg);
         }
 
-        // TR-özel rejection devrede mi? Verdict değişmez, ama DSS'in jenerik
-        // SubIndication mesajının yanına Mersel kataloglu tanı kodunu da
-        // ekliyoruz ki operatör log/grep ile hızlıca filtreleyebilsin.
-        if (trRejection != null && trRejection.getCode() != null) {
-            errors.add("[" + trRejection.getCode() + "] " + trRejection.getReason());
+        // Mersel-katalogu rejection'lar: verdict değişmez, ama DSS'in jenerik
+        // SubIndication mesajının yanına her bir rejection için kataloglu
+        // tanı kodu satırı eklenir (operatör log/grep ile filtreleyebilsin).
+        // Aynı imzaya birden fazla patoloji uygulanmış olabilir (örn.
+        // MISSING_SP_REFERENCE + SIGNER_KEY_USAGE_INSUFFICIENT) — hepsi
+        // ayrı satır olarak yazılır.
+        if (appliedRejections != null) {
+            for (AppliedRejection r : appliedRejections) {
+                if (r != null && r.getCode() != null) {
+                    errors.add("[" + r.getCode() + "] " + r.getReason());
+                }
+            }
+        }
+
+        // TR-XAdES özel SubIndication suppression'ı için kolay erişim:
+        // mevcut implementasyonda yalnızca SIG_CONSTRAINTS_FAILURE üzerinde
+        // konuşuyor. Bunu hesapla; KeyUsage rejection (genelde
+        // CHAIN_CONSTRAINTS_FAILURE) bu suppression yolundan etkilenmez.
+        AppliedRejection trXadesRejection = null;
+        if (appliedRejections != null) {
+            for (AppliedRejection r : appliedRejections) {
+                if (r != null && r.getCode() != null
+                        && r.getCode().startsWith("MDSS-XADES-LEGACY-TR-")) {
+                    trXadesRejection = r;
+                    break;
+                }
+            }
         }
 
         // SubIndication kontrolü
@@ -1282,14 +1505,14 @@ public class AdvancedSignatureVerificationService {
                         + "(\"…/v1.3.2/XAdES.xsd#SignedProperties\"). "
                         + "Kriptografik bütünlük doğrulandı; tolerans uygulandı.";
                 warnings.add("[" + code + "] " + detail);
-            } else if (trRejection != null && subIndication == SubIndication.SIG_CONSTRAINTS_FAILURE) {
+            } else if (trXadesRejection != null && subIndication == SubIndication.SIG_CONSTRAINTS_FAILURE) {
                 // Rejection enrichment devrede: Mersel kataloglu satır zaten
                 // yukarıda eklendi. Jenerik "(Kritik hata)" satırını eklemek
                 // operatöre aynı sorun için ikinci bir hata satırı gösterir
                 // ve "kaç hata var?" sayımını yanıltır; bu yüzden atlanır.
                 logger.debug("SIG_CONSTRAINTS_FAILURE detail line suppressed because "
                         + "Mersel rejection code is already in validationErrors "
-                        + "(signatureId={}, code={}).", signatureId, trRejection.getCode());
+                        + "(signatureId={}, code={}).", signatureId, trXadesRejection.getCode());
             } else {
                 String subIndicationMsg = "İmza uyarısı: " + subIndication.name();
 

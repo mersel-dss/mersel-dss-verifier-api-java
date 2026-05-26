@@ -7,6 +7,67 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+### Security / Breaking
+
+- **Signer cert `KeyUsage` zorunluluğu — `digitalSignature` veya `nonRepudiation`
+  bit'i şart, eksikse imza reddedilir.** Default policy XML'leri
+  (`kamusm-strict-constraint.xml`, `kamusm-signer-strict-constraint.xml`)
+  signer/counter-signer sertifikaları için `<KeyUsage>` kuralını
+  `Level="WARN"`'den `Level="FAIL"`'e yükseltti ve listeyi
+  `digitalSignature` + `nonRepudiation` olarak genişletti (DSS OR semantik —
+  cert'in keyUsage extension'ında bu iki bit'ten en az biri set olmalı).
+
+  **Motivasyon (production gözlemi):** İmzayı yalnızca `keyEncipherment` /
+  `keyAgreement` bit'leriyle yayınlanmış (yani şifreleme amaçlı) bir
+  sertifikayla atan üreticiler tespit edildi — kriptografi doğrulansa
+  bile bu, RFC 5280 §4.2.1.3 ve ETSI EN 319 412-2 §4.3 ihlali. Tübitak
+  referans doğrulayıcı bu durumu zaten "Sertifika anahtar kullanım alanı
+  hatalı" mesajıyla reddediyordu; Mersel DSS Verifier şimdi aynı kararı
+  veriyor. (Çift-doğrulama korpusunda 146 production örneği doğrulandı.)
+
+  **Davranışsal etki:**
+  - Sadece `digitalSignature` set olan cert'ler: kabul edilmeye devam eder.
+  - Sadece `nonRepudiation` set olan cert'ler (Mali Mühür / e-Seal
+    profili — ETSI EN 319 412-2 §4.3): kabul edilmeye devam eder.
+  - `digitalSignature` veya `nonRepudiation` bit'lerinden HİÇBİRİ set
+    olmayan cert'ler (örn. yalnızca `keyEncipherment, keyAgreement`):
+    **yeni davranışta reddedilir** — DSS `Indication=INDETERMINATE`
+    `SubIndication=CHAIN_CONSTRAINTS_FAILURE` üretir.
+  - Operatör custom policy ile `WARN`'a geri indirebilir; bu durumda
+    rejection enrichment de devre dışı kalır.
+
+- **Yeni `RejectionCode.MDSS_XCV_SIGNER_KEY_USAGE_INSUFFICIENT`** —
+  Yukarıdaki red kararına Mersel kataloglu tanı bilgisi eşlik eder.
+  Verdict zaten DSS tarafından INVALID raporlanır; bu enrichment operatöre
+  hangi spesifik X.509 patolojisinin (hangi keyUsage bit'lerinin set olduğu,
+  imzacının CN/serial'i, RFC referansı, remediation önerisi) tetiklediğini
+  `signatures[].appliedRejections` altında ve `validationErrors` satırı
+  olarak iletir.
+
+  Dokümantasyon: [`docs/rejections/MDSS-XCV-SIGNER-KEY-USAGE-INSUFFICIENT.md`](docs/rejections/MDSS-XCV-SIGNER-KEY-USAGE-INSUFFICIENT.md).
+
+### Added
+
+- **Suppression gate defense-in-depth — TR XAdES Type URI suppression
+  artık signer cert keyUsage'ını kontrol ediyor.**
+  `AdvancedSignatureVerificationService.matchesTrLegacyXadesGate` içine
+  `hasAcceptableSigningKeyUsage` kontrolü eklendi: operatör default
+  policy'yi gevşeterek keyUsage'ı `WARN`'a alsa bile, TR-özel Type URI
+  tolerance bu durumda devreye giremez — RFC 5280 ihlali olan bir imza,
+  yalnızca XAdES schema URI yazım hatası tolerans gerekçesiyle VALID'e
+  yükseltilmez. Default policy zaten `FAIL` olduğu için bu kontrol normal
+  çalışma akışında pasif kalır (subIndication=CHAIN_CONSTRAINTS_FAILURE
+  ile gate erken döner), ancak custom policy senaryosunda ikinci savunma
+  katmanıdır.
+
+- **`AppliedRejections` çoklu rejection desteği** — `processSignature`
+  artık tek bir `trRejection` değil, tespit edilen tüm rejection'ları
+  (`MISSING_SP_REFERENCE` + `SIGNER_KEY_USAGE_INSUFFICIENT` aynı imzada
+  beraber çıkabilir) bir liste halinde `SignatureInfo.appliedRejections`
+  ve `validationErrors` içine yansıtıyor. Operatör tek bakışta tüm
+  patolojileri görsün diye; ayrıca `collectErrorsAndWarnings` her rejection
+  için ayrı `[MDSS-...]` satırı yazıyor.
+
 ## [0.4.2] - 2026-05-26
 
 ### Added

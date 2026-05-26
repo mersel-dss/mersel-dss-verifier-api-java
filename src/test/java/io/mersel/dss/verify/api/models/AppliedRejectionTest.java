@@ -46,6 +46,20 @@ class AppliedRejectionTest {
     }
 
     @Test
+    void mdssXcvSignerKeyUsageInsufficient_hasStableCodeAndSeverity() {
+        // Kararlı API kontratı — operatörler ve müşteri istemcileri bu kodu
+        // filter/grep'lerine yazacak. Renaming, kullanıcının log
+        // alarmlarını sessizce bozar.
+        assertEquals("MDSS-XCV-SIGNER-KEY-USAGE-INSUFFICIENT",
+                RejectionCode.MDSS_XCV_SIGNER_KEY_USAGE_INSUFFICIENT.getCode());
+        assertEquals("ERROR",
+                RejectionCode.MDSS_XCV_SIGNER_KEY_USAGE_INSUFFICIENT.getSeverity());
+        // Title kararlılığı — Slack alarmı / dashboard widget'larında görünür.
+        assertEquals("İmzacı sertifikası KeyUsage'da imza yetkisi taşımıyor",
+                RejectionCode.MDSS_XCV_SIGNER_KEY_USAGE_INSUFFICIENT.getTitle());
+    }
+
+    @Test
     void allRejectionDocsUrlsPointToRepoRejectionsFolder() {
         // Suppression'lardan ayrı bir folder altında olduğunu garanti et —
         // discoverability açısından kritik: operatör "valid override mı yoksa
