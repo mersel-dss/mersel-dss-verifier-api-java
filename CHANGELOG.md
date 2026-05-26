@@ -7,6 +7,8 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-05-26
+
 ### Security / Breaking
 
 - **Signer cert `KeyUsage` zorunluluğu — `digitalSignature` veya `nonRepudiation`
