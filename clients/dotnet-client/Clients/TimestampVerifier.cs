@@ -55,6 +55,6 @@ internal sealed class TimestampVerifier : DssVerifierHttpBase, ITimestampVerifie
         AddStringPart(form, "validateCertificate", request.ValidateCertificate ? "true" : "false");
 
         return await PostMultipartJsonAsync<TimestampVerificationResult>(
-            "api/v1/verify/timestamp", form, ct).ConfigureAwait(false);
+            "api/v1/verify/timestamp", form, ct, request.Headers).ConfigureAwait(false);
     }
 }

@@ -115,6 +115,49 @@ var sonuc = await verifier.Signatures.VerifyDetachedAsync(
 );
 ```
 
+### Per-Request Custom Header'lar (Korelasyon / `x-log-*`)
+
+Upstream akıştan gelen korelasyon kimliklerini (request ID, tenant, kullanıcı, trace ID) DSS Verifier servisinin log/alarm akışına da geçirmek için `VerifySignatureRequest.Headers` ve `VerifyTimestampRequest.Headers` üzerinden custom HTTP header eklenir. Sunucu `x-log-*` prefix'li header'ları otomatik olarak MDC'ye taşır; bu header'lar:
+
+- Doğrulama log satırlarına JSON olarak iliştirilir (`xlog={"x-log-id":"…","x-log-tenant":"…"}`),
+- INVALID imza tespit edildiğinde **webhook payload'una** (`logHeaders` alanı) düşer,
+- Webhook isteğine **pass-through HTTP header** olarak iletilir (receiver kendi log'larını eşleyebilsin),
+- **Slack alarm mesajına** ayrı bir "Korelasyon (x-log-*)" bloğunda gösterilir.
+
+Böylece kullanıcının başlattığı akış (örn. e-fatura kabul / red kararı), DSS Verifier loglarından geri izlenebilir.
+
+```csharp
+public class EFaturaDogrulamaServisi(IDssVerifierClient verifier)
+{
+    public async Task<VerificationResult> DogrulaAsync(
+        byte[] imzaliUblXml,
+        string istekId,
+        string tenantId,
+        string kullaniciId,
+        CancellationToken ct = default)
+    {
+        return await verifier.Signatures.VerifyAsync(new VerifySignatureRequest
+        {
+            SignedDocument = imzaliUblXml,
+            Level          = VerificationLevel.COMPREHENSIVE,
+            Headers = new Dictionary<string, string>
+            {
+                ["x-log-id"]     = istekId,
+                ["x-log-tenant"] = tenantId,
+                ["x-log-user"]   = kullaniciId,
+                ["x-log-trace"]  = System.Diagnostics.Activity.Current?.Id
+                                   ?? Guid.NewGuid().ToString("N")
+            }
+        }, ct);
+    }
+}
+```
+
+> **Header kuralları:** İsimler küçük harfle eşlenir; değerler sunucuda max 512 char'a kırpılır ve CR/LF gibi kontrol karakterleri boşlukla değiştirilir (log injection koruması). Request başına en fazla 20 `x-log-*` header işlenir.
+>
+> Tüm tüketici isteklerinde sabit bir header iletmek istiyorsanız (örn. `X-Service-Name`) `Headers` per-request yerine
+> `IHttpClientBuilder.ConfigureHttpClient(http => http.DefaultRequestHeaders.Add(...))` zincirini kullanın — paket boyu sözleşmenizi tek noktada tutar.
+
 ### Türkiye'ye Özgü Tanı Kodları (Suppression / Rejection)
 
 Sunucu, DSS upstream'ın jenerik kararlarını Türkiye e-imza ekosistemine özgü kataloglu kodlarla zenginleştirir. Bu kodlar API kontratı olarak kararlıdır:

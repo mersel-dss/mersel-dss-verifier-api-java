@@ -7,6 +7,48 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+### Added
+- **INVALID imza bildirimleri `x-log-*` korelasyon header'larını taşıyor** —
+  Request thread'inde `LogHeadersFilter`'ın MDC'ye koyduğu tüm `x-log-*`
+  prefix'li header'lar (request ID, tenant, kullanıcı, trace), notifier'ın
+  sync kısmında snapshot edilip async dispatch yolundaki **her kanala**
+  taşınır:
+  - **Generic webhook JSON payload** — yeni `logHeaders: { "x-log-id":
+    "...", "x-log-tenant": "...", ... }` alanı. Anahtarlar deterministik
+    olsun diye sözlük sıralı (TreeMap); hiç header yoksa alan `null`
+    serializasyon hariciyle JSON'a düşmez (schema kararlı).
+  - **Webhook pass-through HTTP header'ları** — receiver kendi log
+    aggregator'ında istek bazlı korelasyon kurabilsin diye her header
+    HTTP header olarak da iletilir. HMAC imza sözleşmesi BOZULMAZ —
+    `X-Mersel-Signature` hala yalnız `timestamp + "." + rawBody` üzerine
+    hesaplanır (header'lar imzaya dahil edilmez; receiver doğrulama yolu
+    aynı kalır, geriye uyumlu).
+  - **Slack mesaj** — özet field bloğundan sonra yeni bir "*Korelasyon
+    (x-log-*):*" section'ı; 10'a kadar header listelenir, fazlası
+    "+N daha" satırıyla özetlenir (Block Kit 3000-char/section limiti
+    için sertleştirme). Hiç header yoksa blok eklenmez (chat'i gürültüye
+    sokmayız).
+  - **Slack bot file upload `initial_comment`** — aynı x-log-* listesi
+    plain mrkdwn satırı olarak dosyanın altında görünür.
+  - **Async-safe snapshot**: MDC thread-local; OkHttp dispatcher'a
+    geçtikten sonra MDC erişimi YOK. Notifier `MDC.getCopyOfContextMap()`'i
+    sync kısımda alıp dispatch zincirine immutable bir kopya geçirerek
+    bu boşluğu kapatır. Tüm dispatch metodları null-safe.
+- **`.NET istemci — per-request custom header desteği** — `VerifySignatureRequest`
+  ve `VerifyTimestampRequest` üzerine yeni `Headers: IDictionary<string,
+  string>?` alanı. `DssVerifierHttpBase` artık `HttpClient.PostAsync(...)`
+  yerine `HttpRequestMessage` + `SendAsync(...)` kullanarak isteğe
+  request-level header ekleyebilir; verifier sub-client'ları
+  `request.Headers`'ı buraya iletir. `TryAddWithoutValidation` ile
+  eklenir (içerik header validation şikayetlerini by-pass eder); tek
+  bir bozuk header diğer header'ların eklenmesini bozmaz. Tipik
+  kullanım: upstream akıştan gelen `x-log-id / x-log-tenant / x-log-user
+  / x-log-trace` gibi korelasyon başlıklarını DSS Verifier log/alarm
+  akışına aktarmak — sunucu tarafında otomatik olarak MDC'ye taşınır,
+  log satırlarına JSON olarak iliştirilir ve INVALID imza
+  webhook/Slack bildirimlerine de propagate edilir. README'ye uçtan
+  uca örnek eklendi.
+
 ## [0.4.1] - 2026-05-26
 
 ### Added

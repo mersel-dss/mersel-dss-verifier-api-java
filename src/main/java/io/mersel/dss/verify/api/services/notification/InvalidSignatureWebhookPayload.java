@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import io.mersel.dss.verify.api.models.VerificationResult;
 
 import java.util.Date;
+import java.util.Map;
 
 /**
  * INVALID imza tespit edildiğinde generic webhook receiver'a basılan JSON
@@ -76,6 +77,20 @@ public class InvalidSignatureWebhookPayload {
      */
     private VerificationResult result;
 
+    /**
+     * İsteğe {@code x-log-*} prefix'iyle gelen korelasyon/audit header'larının
+     * {@code Map<headerName, value>} kopyası. Anahtarlar her zaman küçük
+     * harf ({@code x-log-id}, {@code x-log-tenant}, …); değerler
+     * {@link io.mersel.dss.verify.api.config.LogHeadersFilter} tarafından
+     * sanitize edilmiş hâli (CR/LF temizliği + uzunluk kırpma).
+     *
+     * <p>Receiver bu alanı doğrulama olayını çağıran upstream akışla (örn.
+     * API gateway istek ID, kullanıcı/tenant, trace ID) eşleştirmek için
+     * kullanır. Hiç {@code x-log-*} header'ı yoksa alan {@code null}
+     * (JSON'a da düşmez — {@link JsonInclude} sayesinde).</p>
+     */
+    private Map<String, String> logHeaders;
+
     public InvalidSignatureWebhookPayload() {}
 
     public String getEvent() {
@@ -124,6 +139,14 @@ public class InvalidSignatureWebhookPayload {
 
     public void setResult(VerificationResult result) {
         this.result = result;
+    }
+
+    public Map<String, String> getLogHeaders() {
+        return logHeaders;
+    }
+
+    public void setLogHeaders(Map<String, String> logHeaders) {
+        this.logHeaders = logHeaders;
     }
 
     /**

@@ -63,6 +63,6 @@ internal sealed class SignatureVerifier : DssVerifierHttpBase, ISignatureVerifie
         AddStringPart(form, "level", request.Level.ToString());
 
         return await PostMultipartJsonAsync<VerificationResult>(
-            "api/v1/verify/signature", form, ct).ConfigureAwait(false);
+            "api/v1/verify/signature", form, ct, request.Headers).ConfigureAwait(false);
     }
 }

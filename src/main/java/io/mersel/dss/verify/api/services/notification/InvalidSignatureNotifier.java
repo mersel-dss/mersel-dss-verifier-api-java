@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import io.mersel.dss.verify.api.config.InvalidSignatureNotificationConfiguration;
+import io.mersel.dss.verify.api.config.LogHeadersFilter;
 import io.mersel.dss.verify.api.models.SignatureInfo;
 import io.mersel.dss.verify.api.models.VerificationResult;
 import okhttp3.Call;
@@ -15,6 +16,7 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.info.BuildProperties;
 import org.springframework.stereotype.Service;
@@ -34,6 +36,7 @@ import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
@@ -97,6 +100,14 @@ public class InvalidSignatureNotifier {
     static final int SLACK_MAX_ERRORS_LISTED = 5;
     /** Slack mesajındaki per-signature blok sayısı üst sınırı — multi-imzalı XML için. */
     static final int SLACK_MAX_SIGNATURES_LISTED = 5;
+    /**
+     * Slack mesajında listelenecek korelasyon ({@code x-log-*}) header
+     * sayısı üst sınırı. {@link LogHeadersFilter#MAX_HEADERS} request başına
+     * 20 header kabul ediyor; mesajda hepsini göstermek Block Kit
+     * 3000-char/section limitini zorlayabilir. Üstündeki header'lar
+     * webhook payload'unun {@code logHeaders} alanından okunabilir.
+     */
+    static final int SLACK_MAX_LOG_HEADERS_LISTED = 10;
 
     /**
      * Slack inline base64 fallback: tek bir Block Kit {@code section} bloğunun
@@ -328,6 +339,14 @@ public class InvalidSignatureNotifier {
             return;
         }
 
+        // x-log-* korelasyon header'larını request thread'inden YAKALA.
+        // MDC thread-local'dir; OkHttp dispatcher thread'ine geçtikten
+        // sonra erişim KAYBOLUR. Async dispatch öncesi sync olarak
+        // snapshot alıp tüm dispatch kanallarına immutable bir kopyasını
+        // taşıyoruz — verifier istek thread'inde dururken (LogHeadersFilter
+        // tarafından doldurulmuş) MDC'yi okumak güvenli.
+        Map<String, String> logHeaders = collectXlogHeadersFromMdc();
+
         // Payload + Slack body'yi tek seferde hazırla; iki kanal da aynı
         // doğrulama sonucundan üretildiği için işi tekrar etmiyoruz.
         InvalidSignatureWebhookPayload payload;
@@ -335,8 +354,8 @@ public class InvalidSignatureNotifier {
         try {
             payload = buildWebhookPayload(
                     result, signedBytes, fileName, contentType,
-                    originalBytes, originalFileName);
-            slackBody = buildSlackBody(result, fileName, signedBytes);
+                    originalBytes, originalFileName, logHeaders);
+            slackBody = buildSlackBody(result, fileName, signedBytes, logHeaders);
         } catch (Exception buildEx) {
             // Payload üretimi exception atarsa bildirim gönderemeyiz;
             // doğrulama akışını etkilemeden devam et.
@@ -351,7 +370,7 @@ public class InvalidSignatureNotifier {
         // denenebilir. Kanallar birbirini SUSTURMAZ.
         if (config.hasWebhookDestination()) {
             try {
-                fireWebhookPost(config.getWebhookUrl(), serializeOrEmpty(payload));
+                fireWebhookPost(config.getWebhookUrl(), serializeOrEmpty(payload), logHeaders);
             } catch (Exception e) {
                 logger.warn("InvalidSignatureNotifier webhook dispatch failed: {}", e.getMessage());
             }
@@ -380,7 +399,7 @@ public class InvalidSignatureNotifier {
                         signedBytes,
                         safeFileName(fileName),
                         buildSlackFileTitle(result, fileName),
-                        buildSlackFileInitialComment(result, fileName));
+                        buildSlackFileInitialComment(result, fileName, logHeaders));
             } catch (Exception e) {
                 logger.warn("InvalidSignatureNotifier slack file upload dispatch failed: {}",
                         e.getMessage());
@@ -396,6 +415,56 @@ public class InvalidSignatureNotifier {
     }
 
     /**
+     * Request thread'inin MDC'sinden {@link LogHeadersFilter} tarafından
+     * konulmuş {@code xlog.*} entry'lerini toplar ve orijinal {@code x-log-*}
+     * header adına geri haritalar.
+     *
+     * <p>Sıralama deterministik olsun (snapshot eşitliği, test stabilite,
+     * Slack mesaj okunabilirlik) diye {@link TreeMap} kullanılır —
+     * sözlük sıralı çıktı operatörün gözden geçirmesini kolaylaştırır.
+     * Hiç header yoksa {@link Collections#emptyMap()} döner; tüm dispatch
+     * yolu bu boş haritayı sessizce geçer (JSON {@code logHeaders} alanı
+     * {@code null} kalır, Slack block'u eklenmez).</p>
+     *
+     * <p><b>Async bağlam not</b>: Bu metod yalnız notifier'ın SYNC kısmında
+     * (verifier request thread'i üzerinde) çağrılır. Filter tarafından
+     * konulmuş MDC entry'leri OkHttp dispatcher thread'inde görünmez;
+     * snapshot mantığı doğru async-safe değer aktarımı sağlar.</p>
+     */
+    Map<String, String> collectXlogHeadersFromMdc() {
+        Map<String, String> mdc;
+        try {
+            mdc = MDC.getCopyOfContextMap();
+        } catch (Exception e) {
+            // SLF4J implementasyonu yoksa veya adapter NPE atarsa
+            // (test ortamı dışı pratikte imkânsız) sessiz boş dön.
+            return Collections.emptyMap();
+        }
+        if (mdc == null || mdc.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        TreeMap<String, String> out = new TreeMap<>();
+        String prefix = LogHeadersFilter.MDC_KEY_PREFIX;
+        for (Map.Entry<String, String> e : mdc.entrySet()) {
+            String key = e.getKey();
+            String value = e.getValue();
+            if (key == null || value == null || value.isEmpty()) {
+                continue;
+            }
+            if (!key.startsWith(prefix)) {
+                continue;
+            }
+            // MDC anahtarı "xlog.x-log-id" → "x-log-id" header adına geri dön.
+            String headerName = key.substring(prefix.length());
+            if (headerName.isEmpty()) {
+                continue;
+            }
+            out.put(headerName, value);
+        }
+        return out.isEmpty() ? Collections.emptyMap() : Collections.unmodifiableMap(out);
+    }
+
+    /**
      * Tam payload object'i oluşturur. <strong>Package-private</strong> —
      * birim testleri bu metodu doğrudan çağırarak serializasyon-öncesi
      * yapıyı doğrular (HTTP firing'i mock'lamaya gerek yok).
@@ -406,7 +475,8 @@ public class InvalidSignatureNotifier {
             String fileName,
             String contentType,
             byte[] originalBytes,
-            String originalFileName) {
+            String originalFileName,
+            Map<String, String> logHeaders) {
 
         InvalidSignatureWebhookPayload payload = new InvalidSignatureWebhookPayload();
         payload.setEvent(EVENT_TYPE_INVALID_SIGNATURE);
@@ -423,7 +493,31 @@ public class InvalidSignatureNotifier {
             payload.setOriginalDocument(buildFileEnvelope(originalBytes, originalFileName, null));
         }
 
+        if (logHeaders != null && !logHeaders.isEmpty()) {
+            // Map'i defensive olarak kopyalıyoruz — caller'ın referansı
+            // sonradan mutate olursa serialization sırasında race olmasın.
+            // TreeMap deterministik sıralama (Slack mesajı + JSON kararlı
+            // çıktısı için aynı snapshot kullanılır).
+            payload.setLogHeaders(new TreeMap<>(logHeaders));
+        }
+
         return payload;
+    }
+
+    /**
+     * Test/back-compat overload — explicit {@code logHeaders} verilmediği
+     * durumda {@code null} olarak ilerler. Yeni kodlar tercihen üst
+     * overload'ı (logHeaders'lı) çağırmalı.
+     */
+    InvalidSignatureWebhookPayload buildWebhookPayload(
+            VerificationResult result,
+            byte[] signedBytes,
+            String fileName,
+            String contentType,
+            byte[] originalBytes,
+            String originalFileName) {
+        return buildWebhookPayload(result, signedBytes, fileName, contentType,
+                originalBytes, originalFileName, null);
     }
 
     /**
@@ -446,7 +540,8 @@ public class InvalidSignatureNotifier {
      *                    bölünerek mesaja eklenir. Bot upload aktifse veya
      *                    boyut config eşiğini aşıyorsa fallback ATLANIR.
      */
-    String buildSlackBody(VerificationResult result, String fileName, byte[] signedBytes) {
+    String buildSlackBody(VerificationResult result, String fileName, byte[] signedBytes,
+                          Map<String, String> logHeaders) {
         Map<String, Object> root = new LinkedHashMap<>();
 
         String title = "Mersel DSS Verify - INVALID Signature";
@@ -455,7 +550,8 @@ public class InvalidSignatureNotifier {
         // için zorunlu. blocks olmasa da Slack mesajı yine düşer.
         root.put("text", fallbackText);
 
-        List<Map<String, Object>> blocks = buildSlackBlocks(result, fileName, title, signedBytes);
+        List<Map<String, Object>> blocks = buildSlackBlocks(
+                result, fileName, title, signedBytes, logHeaders);
 
         // attachments[].color → mesajın sol kenarında kırmızı dikey şerit.
         // Block Kit içeriği attachments[].blocks alanına gömülür; Slack
@@ -471,13 +567,22 @@ public class InvalidSignatureNotifier {
     }
 
     /**
+     * Test/back-compat overload — {@code logHeaders} verilmediğinde header
+     * blok'u eklenmez.
+     */
+    String buildSlackBody(VerificationResult result, String fileName, byte[] signedBytes) {
+        return buildSlackBody(result, fileName, signedBytes, null);
+    }
+
+    /**
      * Slack mesaj gövdesini oluşturan Block Kit listesi — attachment
      * wrapper'dan bağımsız, file upload {@code initial_comment} için de
      * yeniden kullanılabilir kalsın diye ayrıştırıldı (uploader şu an
      * markdown plain text kullanıyor; ileride zenginleştirmek için hazır).
      */
     private List<Map<String, Object>> buildSlackBlocks(
-            VerificationResult result, String fileName, String title, byte[] signedBytes) {
+            VerificationResult result, String fileName, String title, byte[] signedBytes,
+            Map<String, String> logHeaders) {
         List<Map<String, Object>> blocks = new ArrayList<>();
 
         // 1) Header — Slack Block Kit'in header type'i en fazla 150 char
@@ -499,6 +604,27 @@ public class InvalidSignatureNotifier {
                     + result.getVerificationTime().toInstant().toString()));
         }
         blocks.add(slackSectionWithFields(summaryFields));
+
+        // 2.5) Korelasyon header'ları — request'e {@code x-log-*}
+        // prefix'iyle gelen tüm header'lar. Operatör chat'te alarmı
+        // kendi upstream akışına (gateway request ID, tenant, trace ID)
+        // anında bağlasın diye sözlük sıralı listeleniyor. Hiç header
+        // yoksa blok eklenmez (gürültü olmaz).
+        if (logHeaders != null && !logHeaders.isEmpty()) {
+            StringBuilder hsb = new StringBuilder("*Korelasyon (x-log-*):*\n");
+            int listed = 0;
+            for (Map.Entry<String, String> e : logHeaders.entrySet()) {
+                if (listed >= SLACK_MAX_LOG_HEADERS_LISTED) {
+                    hsb.append("• … (").append(logHeaders.size() - SLACK_MAX_LOG_HEADERS_LISTED)
+                            .append(" header daha)\n");
+                    break;
+                }
+                hsb.append("• `").append(e.getKey()).append("`: ")
+                        .append(truncate(e.getValue(), 200)).append('\n');
+                listed++;
+            }
+            blocks.add(slackSectionMarkdown(hsb.toString()));
+        }
 
         // 3) Top-level hatalar — DSS jenerik mesajları + tolerance/rejection
         // sonrası servisin oluşturduğu hata listesi.
@@ -708,7 +834,8 @@ public class InvalidSignatureNotifier {
      * {@code completeUploadExternal} initial_comment için zengin format
      * desteği sınırlı; mrkdwn-flavored plain text en güvenli yol.
      */
-    String buildSlackFileInitialComment(VerificationResult result, String fileName) {
+    String buildSlackFileInitialComment(VerificationResult result, String fileName,
+                                        Map<String, String> logHeaders) {
         StringBuilder sb = new StringBuilder();
         sb.append(":rotating_light: *Mersel DSS Verify – INVALID Signature*\n");
         sb.append("• Dosya: `").append(safeFileName(fileName)).append("`\n");
@@ -723,7 +850,30 @@ public class InvalidSignatureNotifier {
         if (errors != null && !errors.isEmpty()) {
             sb.append("• İlk Hata: ").append(truncate(errors.get(0), 250)).append('\n');
         }
+        if (logHeaders != null && !logHeaders.isEmpty()) {
+            sb.append("• Korelasyon (x-log-*):");
+            int listed = 0;
+            for (Map.Entry<String, String> e : logHeaders.entrySet()) {
+                if (listed >= SLACK_MAX_LOG_HEADERS_LISTED) {
+                    sb.append(" … (+")
+                            .append(logHeaders.size() - SLACK_MAX_LOG_HEADERS_LISTED)
+                            .append(")");
+                    break;
+                }
+                sb.append(" `").append(e.getKey()).append("`=")
+                        .append(truncate(e.getValue(), 120));
+                listed++;
+            }
+            sb.append('\n');
+        }
         return truncate(sb.toString(), 1500);
+    }
+
+    /**
+     * Back-compat overload — eski testler korelasyon header'sız çağırabilsin.
+     */
+    String buildSlackFileInitialComment(VerificationResult result, String fileName) {
+        return buildSlackFileInitialComment(result, fileName, null);
     }
 
     private InvalidSignatureWebhookPayload.FileEnvelope buildFileEnvelope(
@@ -767,7 +917,7 @@ public class InvalidSignatureNotifier {
      * receiver bu durumda yalnız URL gizliliğine güvenir (Slack incoming
      * webhook modeli paraleli).</p>
      */
-    private void fireWebhookPost(String url, String jsonBody) {
+    private void fireWebhookPost(String url, String jsonBody, Map<String, String> logHeaders) {
         if (httpClient == null) {
             // Lazy init + runtime config değişimi defansı: PostConstruct
             // sırasında hiçbir destination yoktu, OkHttpClient kurulmadı.
@@ -801,6 +951,25 @@ public class InvalidSignatureNotifier {
             logger.warn("InvalidSignatureNotifier webhook: URL geçersiz, gönderim atlandı: {}",
                     badUrl.getMessage());
             return;
+        }
+
+        // Korelasyon header'larını PASS-THROUGH olarak ekle — receiver
+        // upstream'e zincirleme bağlandığında aynı x-log-* başlıklarıyla
+        // kendi log'larını işaretleyebilsin. Header değerleri zaten
+        // {@link LogHeadersFilter#sanitizeValue} ile CR/LF temizlenmiş;
+        // ama yine de OkHttp Headers builder'ın illegal değer (örn.
+        // header isminde Unicode/whitespace) atması durumunda zinciri
+        // kesmeden geç — defense-in-depth.
+        if (logHeaders != null && !logHeaders.isEmpty()) {
+            for (Map.Entry<String, String> e : logHeaders.entrySet()) {
+                try {
+                    builder.header(e.getKey(), e.getValue());
+                } catch (Exception headerEx) {
+                    logger.debug("InvalidSignatureNotifier webhook: log header eklenemedi "
+                                    + "(name={}): {}",
+                            e.getKey(), headerEx.getMessage());
+                }
+            }
         }
 
         if (config.hasWebhookSecret()) {

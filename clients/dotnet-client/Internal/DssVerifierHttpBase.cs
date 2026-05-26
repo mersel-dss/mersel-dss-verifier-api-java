@@ -76,14 +76,77 @@ internal abstract class DssVerifierHttpBase
     /// <summary>
     /// JSON yanıtı bekleyen POST(multipart) istekleri için yardımcı.
     /// </summary>
+    /// <param name="path">Endpoint yolu (BaseAddress'a göre relative).</param>
+    /// <param name="content">Multipart gövde.</param>
+    /// <param name="ct">İptal belirteci.</param>
+    /// <param name="headers">
+    /// Opsiyonel ek HTTP request header'ları. Tipik kullanım sunucu tarafında
+    /// log/alarm korelasyonu için <c>x-log-*</c> prefix'li başlıkları
+    /// iletmektir; mantıken her custom header desteklenir.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// Header'lar <see cref="HttpRequestMessage.Headers"/>'a
+    /// <see cref="System.Net.Http.Headers.HttpHeaders.TryAddWithoutValidation(string, string)"/>
+    /// ile eklenir; .NET tarafının "well-known content header'ı request
+    /// header'ına eklenemez" tipi katı validasyonlarını by-pass ederek
+    /// kullanıcı verdiği isimle birebir iletilir.
+    /// </para>
+    /// <para>
+    /// <c>HttpClient.PostAsync(...)</c> kullanılmaz çünkü request header'larını
+    /// yönetmeye izin vermez; bunun yerine
+    /// <see cref="HttpClient.SendAsync(HttpRequestMessage, HttpCompletionOption, CancellationToken)"/>
+    /// kullanılarak request mesajına header'lar set edilir.
+    /// </para>
+    /// </remarks>
     protected async Task<T> PostMultipartJsonAsync<T>(
         string path,
         MultipartFormDataContent content,
-        CancellationToken ct)
+        CancellationToken ct,
+        IDictionary<string, string>? headers = null)
     {
-        using var response = await HttpClient.PostAsync(path, content, ct).ConfigureAwait(false);
+        using var request = new HttpRequestMessage(HttpMethod.Post, path)
+        {
+            Content = content
+        };
+        ApplyAdditionalHeaders(request, headers);
+
+        using var response = await HttpClient
+            .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct)
+            .ConfigureAwait(false);
         await EnsureSuccessAsync(response, path, ct).ConfigureAwait(false);
         return await ReadJsonAsync<T>(response, path, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Verilen header sözlüğünü request mesajına iliştirir. Boş/null değerler
+    /// veya boş anahtarlar sessizce atlanır; geçersiz header isimlerinde
+    /// (örn. CR/LF içeren) bir header bütün isteği bozmaz.
+    /// </summary>
+    private void ApplyAdditionalHeaders(
+        HttpRequestMessage request,
+        IDictionary<string, string>? headers)
+    {
+        if (headers is null || headers.Count == 0) return;
+
+        foreach (var kv in headers)
+        {
+            var name = kv.Key;
+            var value = kv.Value;
+            if (string.IsNullOrWhiteSpace(name) || value is null) continue;
+
+            // TryAddWithoutValidation: kullanıcı header değerini sanitize
+            // etmek istiyorsa kendisi yapar; biz sessiz drop yapmaktansa
+            // header eklemeyi deneyip başarısız olursa debug-log atıyoruz.
+            // Tek bir bozuk header diğer header'ların eklenmesini ya da
+            // isteğin gönderilmesini engellememeli.
+            if (!request.Headers.TryAddWithoutValidation(name, value))
+            {
+                Logger.LogDebug(
+                    "DssVerifier ek header eklenemedi (Name: {Header}); isteğe dahil edilmedi.",
+                    name);
+            }
+        }
     }
 
     // ── Hata/Yanıt parse ────────────────────────────────────────────

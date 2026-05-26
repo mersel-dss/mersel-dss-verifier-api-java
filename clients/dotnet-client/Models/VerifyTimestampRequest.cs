@@ -35,4 +35,14 @@ public sealed class VerifyTimestampRequest
     /// (hızlı ama trust kararı vermez). Varsayılan: <c>true</c>.
     /// </summary>
     public bool ValidateCertificate { get; set; } = true;
+
+    /// <summary>
+    /// İsteğe ek custom HTTP request header'ları. Sunucu tarafındaki
+    /// <c>LogHeadersFilter</c> <c>x-log-*</c> prefix'li tüm header'ları
+    /// otomatik olarak MDC'ye taşır ve doğrulama log satırlarına JSON olarak
+    /// iliştirir. Upstream akıştan gelen korelasyon kimliklerini (request ID,
+    /// tenant, trace) DSS Verifier log/alarm akışına geçirmek için kullanın.
+    /// Detaylar için <see cref="VerifySignatureRequest.Headers"/> belgelerine bakın.
+    /// </summary>
+    public IDictionary<string, string>? Headers { get; set; }
 }

@@ -3,6 +3,7 @@ package io.mersel.dss.verify.api.services.notification;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.mersel.dss.verify.api.config.InvalidSignatureNotificationConfiguration;
+import io.mersel.dss.verify.api.config.LogHeadersFilter;
 import io.mersel.dss.verify.api.models.AppliedRejection;
 import io.mersel.dss.verify.api.models.CertificateInfo;
 import io.mersel.dss.verify.api.models.SignatureInfo;
@@ -16,6 +17,7 @@ import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.MDC;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -23,7 +25,9 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -93,6 +97,21 @@ class InvalidSignatureNotifierTest {
     @AfterEach
     void tearDown() throws Exception {
         server.shutdown();
+        // MDC test thread'inde paylaşıldığı için her testten sonra
+        // temizlik şart — başka testlerin xlog snapshot'una sızmasın.
+        MDC.clear();
+    }
+
+    /**
+     * Test thread'ine {@link io.mersel.dss.verify.api.config.LogHeadersFilter}
+     * tarafından konulmuş gibi {@code xlog.x-log-*} MDC entry'leri yerleştirir.
+     * Notifier {@code MDC.getCopyOfContextMap()} ile bunları sync olarak
+     * toplar.
+     */
+    private void putXlogToMdc(Map<String, String> headers) {
+        for (Map.Entry<String, String> e : headers.entrySet()) {
+            MDC.put(LogHeadersFilter.MDC_KEY_PREFIX + e.getKey(), e.getValue());
+        }
     }
 
     // --- Gate / no-op davranışı ---------------------------------------------
@@ -973,6 +992,194 @@ class InvalidSignatureNotifierTest {
         // 3) Decode hint footer'i mesajda görünmeli (alıcı için)
         assertTrue(json.contains("pbpaste | base64 -d"),
                 "macOS decode hint Slack mesajında görünmeli");
+    }
+
+    // --- x-log-* korelasyon header propagation ------------------------------
+    //
+    // Sözleşme: LogHeadersFilter request thread'inin MDC'sine xlog.x-log-*
+    // entry'lerini yerleştirir. Notifier doNotifyIfInvalid'ın SYNC kısmında
+    // (OkHttp dispatcher thread'ine geçmeden ÖNCE) bu entry'leri okuyup
+    // tüm dispatch kanallarına (webhook payload, webhook HTTP headers,
+    // Slack mesaj blokları, file upload initial_comment) snapshot olarak
+    // taşır. Async OkHttp callback'inde MDC erişimi YOK; snapshot
+    // mantığının doğru çalıştığını uçtan uca doğruluyoruz.
+
+    @Test
+    void webhookPayload_includesLogHeadersMap_fromMdc() throws Exception {
+        config.setWebhookUrl(server.url("/hook").toString());
+        server.enqueue(new MockResponse().setResponseCode(200));
+
+        Map<String, String> hdrs = new LinkedHashMap<>();
+        hdrs.put("x-log-id", "req-abc-123");
+        hdrs.put("x-log-tenant", "finsel-tr");
+        hdrs.put("x-log-trace", "trace-xyz-789");
+        putXlogToMdc(hdrs);
+
+        notifier.notifyIfInvalid(invalidResult(), new byte[]{1, 2, 3}, "x.xml",
+                "application/xml", null, null);
+
+        RecordedRequest req = server.takeRequest(2, TimeUnit.SECONDS);
+        assertNotNull(req, "Webhook POST atılmalı");
+        JsonNode root = mapper.readTree(req.getBody().readUtf8());
+
+        JsonNode lh = root.get("logHeaders");
+        assertNotNull(lh, "x-log-* header'ları logHeaders JSON alanına yazılmalı");
+        assertTrue(lh.isObject());
+        assertEquals("req-abc-123", lh.get("x-log-id").asText());
+        assertEquals("finsel-tr", lh.get("x-log-tenant").asText());
+        assertEquals("trace-xyz-789", lh.get("x-log-trace").asText());
+    }
+
+    @Test
+    void webhookHttpHeaders_forwardXlogHeaders_asPassThrough() throws Exception {
+        // Webhook receiver upstream akışla kendi log'larını eşleştirebilsin
+        // diye x-log-* header'lar HTTP header olarak da iletilmeli (payload
+        // body'de görünmek tek başına yeterli değil; bazı receiver'lar
+        // sadece header'a bakar).
+        config.setWebhookUrl(server.url("/hook").toString());
+        server.enqueue(new MockResponse().setResponseCode(204));
+
+        Map<String, String> hdrs = new LinkedHashMap<>();
+        hdrs.put("x-log-id", "req-aa-22");
+        hdrs.put("x-log-user", "U-77");
+        putXlogToMdc(hdrs);
+
+        notifier.notifyIfInvalid(invalidResult(), new byte[]{1}, "x.xml",
+                "application/xml", null, null);
+
+        RecordedRequest req = server.takeRequest(2, TimeUnit.SECONDS);
+        assertNotNull(req);
+        assertEquals("req-aa-22", req.getHeader("x-log-id"),
+                "x-log-id pass-through HTTP header olarak iletilmeli");
+        assertEquals("U-77", req.getHeader("x-log-user"),
+                "x-log-user pass-through HTTP header olarak iletilmeli");
+        // Mersel kendi header'ları yine var (regresyon kontrolü)
+        assertNotNull(req.getHeader(InvalidSignatureNotifier.HEADER_WEBHOOK_ID));
+        assertNotNull(req.getHeader(InvalidSignatureNotifier.HEADER_WEBHOOK_TIMESTAMP));
+    }
+
+    @Test
+    void hmacSignature_excludesLogHeaders_signsOnlyBody() throws Exception {
+        // HMAC kontratı: signingString = "<timestamp>.<rawBody>". Header'lar
+        // imzaya dahil DEĞİL (receiver yalnız body+timestamp ile doğruluyor).
+        // x-log-* header'ları eklenince de imza body+timestamp'ten
+        // hesaplanmaya devam etmeli — receiver perspektifinden doğrulanır.
+        config.setWebhookUrl(server.url("/hook").toString());
+        config.setWebhookSecret("super-secret");
+        server.enqueue(new MockResponse().setResponseCode(200));
+
+        notifier.setUnixSecondsClock(() -> 1_700_000_000L);
+        notifier.setIdGenerator(() -> "fid");
+
+        Map<String, String> hdrs = new LinkedHashMap<>();
+        hdrs.put("x-log-id", "any-corr-id");
+        putXlogToMdc(hdrs);
+
+        notifier.notifyIfInvalid(invalidResult(), new byte[]{1},
+                "x.xml", "application/xml", null, null);
+
+        RecordedRequest req = server.takeRequest(2, TimeUnit.SECONDS);
+        assertNotNull(req);
+        String body = req.getBody().readUtf8();
+        String sig = req.getHeader(InvalidSignatureNotifier.HEADER_WEBHOOK_SIGNATURE);
+        String expected = "sha256=" + InvalidSignatureNotifier.computeHmacSha256Hex(
+                "1700000000." + body, "super-secret");
+        assertEquals(expected, sig,
+                "HMAC imzası body+timestamp'ten hesaplanmalı; x-log-* header'ları imzayı etkilememeli");
+    }
+
+    @Test
+    void slackBody_includesCorrelationSection_whenXlogHeadersPresent() throws Exception {
+        config.setSlackWebhookUrl(server.url("/services/T/B/x").toString());
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("ok"));
+
+        Map<String, String> hdrs = new LinkedHashMap<>();
+        hdrs.put("x-log-id", "slack-corr-1");
+        hdrs.put("x-log-tenant", "demo");
+        putXlogToMdc(hdrs);
+
+        notifier.notifyIfInvalid(invalidResult(), new byte[]{1}, "x.xml",
+                "application/xml", null, null);
+
+        RecordedRequest req = server.takeRequest(2, TimeUnit.SECONDS);
+        assertNotNull(req);
+        String json = req.getBody().readUtf8();
+
+        assertTrue(json.contains("Korelasyon (x-log-*)"),
+                "Slack mesajı 'Korelasyon (x-log-*)' başlığını taşımalı");
+        assertTrue(json.contains("x-log-id"));
+        assertTrue(json.contains("slack-corr-1"));
+        assertTrue(json.contains("x-log-tenant"));
+        assertTrue(json.contains("demo"));
+    }
+
+    @Test
+    void slackBody_omitsCorrelationSection_whenNoXlogHeaders() {
+        // MDC boş → blok eklenmemeli (gürültü olmamalı). Notifier
+        // dahili buildSlackBody overload'ı null logHeaders'ı kabul edip
+        // sessizce atlar.
+        String body = notifier.buildSlackBody(invalidResult(), "x.xml", null, null);
+        assertNotNull(body);
+        assertFalse(body.contains("Korelasyon (x-log-*)"),
+                "x-log-* header yokken Slack korelasyon bloğu eklenmemeli");
+    }
+
+    @Test
+    void slackFileInitialComment_includesXlogHeaders_inline() {
+        Map<String, String> hdrs = new LinkedHashMap<>();
+        hdrs.put("x-log-id", "upload-corr-7");
+
+        String comment = notifier.buildSlackFileInitialComment(
+                invalidResult(), "doc.xml", hdrs);
+
+        assertNotNull(comment);
+        assertTrue(comment.contains("Korelasyon (x-log-*)"),
+                "Bot upload initial_comment x-log-* satırını taşımalı");
+        assertTrue(comment.contains("x-log-id"));
+        assertTrue(comment.contains("upload-corr-7"));
+    }
+
+    @Test
+    void collectXlogHeadersFromMdc_returnsEmptyMap_whenMdcEmpty() {
+        // Doğrudan helper'ı test ediyoruz — boş MDC'de allocation-free
+        // davranışı (Collections.emptyMap) garanti olsun.
+        Map<String, String> snapshot = notifier.collectXlogHeadersFromMdc();
+        assertNotNull(snapshot);
+        assertTrue(snapshot.isEmpty());
+    }
+
+    @Test
+    void collectXlogHeadersFromMdc_ignoresNonXlogKeys() {
+        // MDC'de başka kodun koyduğu non-xlog anahtarlar var: alarmda
+        // sızdırılmasın (gizlilik + chat kirliliği). Yalnız xlog.* prefix'i
+        // ile başlayanlar yakalanmalı.
+        MDC.put("xlog.x-log-id", "corr-id-99");
+        MDC.put("user.id", "U-123"); // başka kod
+        MDC.put("trace.id", "T-456"); // başka kod
+
+        Map<String, String> snap = notifier.collectXlogHeadersFromMdc();
+        assertEquals(1, snap.size(), "Yalnız xlog.* prefix'li entry alınmalı");
+        assertEquals("corr-id-99", snap.get("x-log-id"));
+        assertFalse(snap.containsKey("user.id"));
+        assertFalse(snap.containsKey("trace.id"));
+    }
+
+    @Test
+    void logHeaders_jsonFieldOmitted_whenMdcEmpty() throws Exception {
+        // logHeaders alanı NON_NULL serialization politikasına tabi:
+        // boş ise JSON'a düşmemeli (gürültü yok, schema kararlı).
+        config.setWebhookUrl(server.url("/hook").toString());
+        server.enqueue(new MockResponse().setResponseCode(200));
+
+        // MDC'ye hiçbir şey koymuyoruz
+        notifier.notifyIfInvalid(invalidResult(), new byte[]{1}, "x.xml",
+                "application/xml", null, null);
+
+        RecordedRequest req = server.takeRequest(2, TimeUnit.SECONDS);
+        JsonNode root = mapper.readTree(req.getBody().readUtf8());
+
+        assertFalse(root.has("logHeaders"),
+                "x-log-* header yokken logHeaders alanı JSON'a düşmemeli");
     }
 
     // --- Helpers ------------------------------------------------------------
