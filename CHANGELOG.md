@@ -7,6 +7,39 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+### Changed
+- **Doğrulama exception'ları (bozuk XML, eksik namespace, parse hataları)
+  artık Slack/webhook bildirimi tetikliyor** — Önceden `/api/v1/verify/xades`,
+  `/api/v1/verify/signature` ve diğer imza doğrulama endpoint'lerine geçersiz
+  XML (örn. namespace bağlanmamış prefix, XML olmayan içerik) gönderildiğinde
+  endpoint 400 + `VERIFICATION_ERROR` ile dönüyor ama Slack/webhook hiç
+  bildirim almıyordu — çünkü `notifyIfInvalid()` çağrısı try bloğunun
+  success-path'ine gömülüydü; DSS'in parse exception'ı onu hiç çalıştırmadan
+  catch bloğuna düşürüyordu. Şimdi:
+  - `AdvancedSignatureVerificationService.verifySignature()` dosya
+    metadatasını ve byte içeriklerini ÖNDEN okuyor (method-scope), parse
+    hatası sonrası catch bloğunda erişilebilir kalıyor.
+  - Yeni private helper `notifyVerificationFailure(...)` sentetik bir
+    `VerificationResult` üretiyor: `valid=false`, `status="VERIFICATION_ERROR"`
+    (yeni status — receiver "imza bozuk" ile "doğrulama hiç çalıştırılamadı"
+    arasını ayırt edebilsin), `verificationTime`, `signatureCount=0`,
+    `errors[]` exception cause zincirini 5 seviyeye kadar (sonsuz döngü
+    koruması var) içeriyor.
+  - Mevcut `InvalidSignatureNotifier.notifyIfInvalid(...)` dispatch yolu
+    olduğu gibi tekrar kullanılıyor — generic webhook + HMAC, Slack incoming
+    webhook, Slack bot file upload, x-log-* korelasyon header'ları, dosya
+    sha256/size/base64 içerik gating, `notification.invalid-signature.*`
+    config tüm flag'leriyle. Slack mesajı da aynı Block Kit formatında düşer:
+    dosya adı, status (`VERIFICATION_ERROR`), parse hatası errors[]'da, tüm
+    inline base64 fallback / bot upload yolları aynı boyut sınırlarıyla
+    çalışır. Operatör başarısız doğrulama isteklerini (saldırı denemesi,
+    upstream üretici bozuk XML basıyor, vb.) artık chat'te canlı görür.
+  - Bildirim üretimi/dispatch'i Throwable yutuyor — verifier'ın `400` HTTP
+    yanıt kontratı (operatöre `VerificationException` re-throw'u) bozulmaz.
+  - `originalDocument.getBytes()` artık tek noktada okunup hem DSS detached
+    content olarak hem de bildirim akışına geçirilir — daha önce success-path
+    içinde ikinci bir kez okunuyordu (artık tek read).
+
 ## [0.4.2] - 2026-05-26
 
 ### Added

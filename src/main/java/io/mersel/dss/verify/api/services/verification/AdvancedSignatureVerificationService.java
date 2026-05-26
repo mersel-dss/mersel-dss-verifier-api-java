@@ -240,9 +240,22 @@ public class AdvancedSignatureVerificationService {
 
         logger.info("Starting advanced signature verification. Level: {}", level);
 
+        // Dosya metadatasını ve byte içeriklerini ÖNDEN oku. Doğrulayıcı (DSS)
+        // tarafında parse hatası (örn. bozuk/namespace eksik XML) atılırsa
+        // ana try/catch'in sonunda bu değerlerle Slack/webhook bildirimini
+        // hâlâ gönderebilelim diye method-scope'a alıyoruz. Önceki davranışta
+        // bytes ve fileName ana try'in içinde okunuyordu; o yüzden parse
+        // exception'ı sonrası catch bloğunun bildirim için elinde hiçbir
+        // bağlam kalmıyordu (Slack mesajı hiç düşmüyordu).
+        String signedFileName = signedDocument != null ? signedDocument.getOriginalFilename() : null;
+        String signedContentType = signedDocument != null ? signedDocument.getContentType() : null;
+        String originalFileName = (originalDocument != null && !originalDocument.isEmpty())
+                ? originalDocument.getOriginalFilename() : null;
+        byte[] signedBytes = null;
+        byte[] originalBytes = null;
+
         try {
-            // Dokümanı oku
-            byte[] signedBytes = signedDocument.getBytes();
+            signedBytes = signedDocument.getBytes();
 
             // GİB/TÜBİTAK Mali Mühür ECDSA imzaları (DER-encoded) için W3C XMLDSig
             // uyumluluğunu sağla: SignatureValue içindeki ASN.1 DER SEQUENCE'i raw r||s'e çevir.
@@ -251,14 +264,18 @@ public class AdvancedSignatureVerificationService {
                 signedBytes = ecdsaXmlSignaturePreprocessor.preprocess(signedBytes);
             }
 
-            DSSDocument document = new InMemoryDocument(signedBytes, signedDocument.getOriginalFilename());
+            DSSDocument document = new InMemoryDocument(signedBytes, signedFileName);
 
-            // Orijinal doküman varsa (detached signature için)
+            // Orijinal doküman varsa (detached signature için). Byte'ları
+            // method-scope'a kaydediyoruz: hem DSS detached content olarak
+            // kullanıyoruz hem de bildirim akışına aktarıyoruz (parse hatası
+            // sonrası catch bloğu da görsün).
             List<DSSDocument> detachedContents = new ArrayList<>();
             if (originalDocument != null && !originalDocument.isEmpty()) {
+                originalBytes = originalDocument.getBytes();
                 DSSDocument detachedContent = new InMemoryDocument(
-                        originalDocument.getBytes(),
-                        originalDocument.getOriginalFilename()
+                        originalBytes,
+                        originalFileName
                 );
                 detachedContents.add(detachedContent);
             }
@@ -337,26 +354,11 @@ public class AdvancedSignatureVerificationService {
             // signedBytes'la bildirim yine gider.
             try {
                 if (invalidSignatureNotifier != null) {
-                    byte[] originalBytes = null;
-                    String originalFileName = null;
-                    if (originalDocument != null && !originalDocument.isEmpty()) {
-                        try {
-                            originalBytes = originalDocument.getBytes();
-                            originalFileName = originalDocument.getOriginalFilename();
-                        } catch (Exception readEx) {
-                            // MultipartFile temp-file delete edilmişse veya
-                            // disk hatası varsa exception atabilir. Bildirim
-                            // gönderebilmek için signedBytes yeter; null geç.
-                            logger.warn("Notifier için originalDocument byte'ları okunamadı "
-                                            + "(bildirim originalDocument alanı olmadan gönderilecek): {}",
-                                    readEx.getMessage());
-                        }
-                    }
                     invalidSignatureNotifier.notifyIfInvalid(
                             result,
                             signedBytes,
-                            signedDocument != null ? signedDocument.getOriginalFilename() : null,
-                            signedDocument != null ? signedDocument.getContentType() : null,
+                            signedFileName,
+                            signedContentType,
                             originalBytes,
                             originalFileName);
                 }
@@ -371,7 +373,111 @@ public class AdvancedSignatureVerificationService {
 
         } catch (Exception e) {
             logger.error("Advanced signature verification failed: {}", e.getMessage(), e);
+
+            // ÖNEMLİ: Doğrulama exception'ı (örn. bozuk XML, eksik
+            // namespace, parse hatası) atıldığında Slack/webhook bildirimi
+            // ESKİDEN HİÇ DÜŞMÜYORDU çünkü notify çağrısı try bloğunun
+            // success-path'ine gömülüydü. Şimdi sentetik bir
+            // VerificationResult ({@code valid=false},
+            // {@code status="VERIFICATION_ERROR"}, hata mesajı + cause
+            // zinciri errors[]'da) üretip aynı dispatch yolundan
+            // gönderiyoruz: dosya adı, boyut, sha256, base64 içerik,
+            // x-log-* korelasyon header'ları — operatörün sahip olduğu tüm
+            // bağlam Slack/webhook'a ulaşır. Bildirim hatası akışı bozmaz;
+            // notifyVerificationFailure kendi içinde Throwable yutar.
+            notifyVerificationFailure(e, signedBytes, signedFileName, signedContentType,
+                    originalBytes, originalFileName);
+
             throw new VerificationException("İmza doğrulama hatası: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Doğrulama akışı bir exception ile patladığında (örn. bozuk XML, eksik
+     * namespace, ECDSA preprocessor hatası, multipart IO hatası), Slack/
+     * webhook kanalına yine de bildirim gider — operatör başarısız
+     * doğrulama isteklerini de chat'te canlı görsün diye.
+     *
+     * <p>Bu metod sentetik bir {@link VerificationResult} üretir
+     * ({@code valid=false}, {@code status="VERIFICATION_ERROR"}) ve
+     * exception cause zincirini {@code errors} listesine yazar; ardından
+     * mevcut {@link InvalidSignatureNotifier#notifyIfInvalid} dispatch
+     * yolunu çağırır. Notifier'ın <em>tüm</em> kanal mantığı (generic
+     * webhook + HMAC, Slack incoming webhook, Slack bot file upload,
+     * x-log-* korelasyon header snapshot'ı) hiç değişmeden re-use edilir;
+     * bu sayede başarısız doğrulamalar başarılı INVALID akışıyla bire-bir
+     * aynı şema, aynı kanallar, aynı boyut sınırları içinde raporlanır.</p>
+     *
+     * <p>Best-effort kontratı: bildirim üretimi/dispatch'i sırasında
+     * herhangi bir Throwable atılırsa yutulur; verifier akışı (re-throw
+     * yapılacak {@link VerificationException}) etkilenmez.</p>
+     *
+     * @param failure         doğrulamayı bozan exception (cause zinciri ile).
+     * @param signedBytes     varsa imzalı doküman byte'ları (hash + içerik için).
+     *                        {@code null} olabilir (örn. multipart read hatası).
+     * @param signedFileName  imzalı doküman adı; {@code null} olabilir.
+     * @param signedContentType imzalı doküman MIME tipi; {@code null} olabilir.
+     * @param originalBytes   varsa detached orijinal doküman byte'ları.
+     * @param originalFileName detached orijinal doküman adı.
+     */
+    private void notifyVerificationFailure(
+            Throwable failure,
+            byte[] signedBytes,
+            String signedFileName,
+            String signedContentType,
+            byte[] originalBytes,
+            String originalFileName) {
+
+        if (invalidSignatureNotifier == null) {
+            return;
+        }
+
+        try {
+            VerificationResult syntheticResult = new VerificationResult();
+            syntheticResult.setValid(false);
+            // Yeni status kodu — "INVALID"den ayrı tutuyoruz: receiver
+            // "imza bozuk" ile "doğrulama hiç çalıştırılamadı (parse/IO
+            // hatası)" arasını ayırt edebilsin. Slack mesajının özet
+            // bloğunda bu değer code-format'lı olarak görünür.
+            syntheticResult.setStatus("VERIFICATION_ERROR");
+            syntheticResult.setVerificationTime(new Date());
+            syntheticResult.setSignatureCount(0);
+
+            List<String> errors = new ArrayList<>();
+            // Cause zincirini ilk 5 seviyeye kadar takip et (sonsuz döngü
+            // koruması: cause kendisini referanslıyorsa kır). Receiver'a
+            // exception nedeni hakkında olabildiğince zengin bağlam veririz
+            // ama Slack 3000-char/section limitini de patlatmayız.
+            Throwable cur = failure;
+            int depth = 0;
+            while (cur != null && depth < 5) {
+                String msg = cur.getMessage();
+                if (msg == null || msg.trim().isEmpty()) {
+                    msg = cur.getClass().getSimpleName();
+                }
+                errors.add((depth == 0 ? "İmza doğrulama hatası: " : "Caused by: ") + msg);
+                Throwable next = cur.getCause();
+                if (next == null || next == cur) {
+                    break;
+                }
+                cur = next;
+                depth++;
+            }
+            syntheticResult.setErrors(errors);
+
+            invalidSignatureNotifier.notifyIfInvalid(
+                    syntheticResult,
+                    signedBytes,
+                    signedFileName,
+                    signedContentType,
+                    originalBytes,
+                    originalFileName);
+        } catch (Throwable t) {
+            // Bildirim verifier akışını ASLA bozmaz — Throwable yakalıyoruz
+            // (NoClassDefFoundError vb. dahil). WARN yetiyor; verifier zaten
+            // VerificationException ile yukarıya bilgi taşıyor.
+            logger.warn("Verification failure notification dispatch failed (yok sayıldı): {}",
+                    t.toString());
         }
     }
 
