@@ -7,6 +7,8 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-05-26
+
 ### Added
 - **`.NET / NuGet istemci SDK'sı: `MERSEL.Services.DssVerifier.Client`** —
   Verifier API'yi HTTP üzerinden tüketen, tek satır DI kaydıyla
