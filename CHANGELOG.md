@@ -7,6 +7,8 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-05-28
+
 ### Fixed
 - **🐞 Tolerance gate v2.0/v2.1 — Cryptographic re-validation katmanı
   tasarım hatasıydı; v2.2'de tamamen kaldırıldı (regression fix)** —
