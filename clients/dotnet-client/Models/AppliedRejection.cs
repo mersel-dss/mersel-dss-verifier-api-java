@@ -66,6 +66,15 @@ public sealed class AppliedRejection
     /// Rejection'ı tetikleyen somut delil. Free-form key/value; her
     /// <see cref="Code"/>'a göre içeriği değişir.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Deserialize davranışı</b>: <c>System.Text.Json</c> her değeri
+    /// <see cref="System.Text.Json.JsonElement"/> olarak deserialize eder
+    /// (target tip <c>object</c> olduğu için). Primitive erişim için
+    /// <c>elem.GetString()</c>, <c>elem.GetInt64()</c>, <c>elem.GetBoolean()</c>
+    /// vb. çağırın.
+    /// </para>
+    /// </remarks>
     [JsonPropertyName("evidence")]
     public Dictionary<string, object>? Evidence { get; set; }
 

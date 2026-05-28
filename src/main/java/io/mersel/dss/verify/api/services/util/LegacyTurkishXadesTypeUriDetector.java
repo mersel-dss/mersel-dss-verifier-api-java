@@ -341,4 +341,15 @@ public class LegacyTurkishXadesTypeUriDetector {
         }
         return -1;
     }
+
+    // -------------------------------------------------------------------------
+    // NOT — Eskiden burada "cryptographic re-validation" katmanı için Type
+    // URI normalize ediliyordu (`normalizeTypeUri` + helper'lar). Tasarım
+    // hatasıydı: `<ds:Reference Type="...">` attribute değeri SignedInfo
+    // bloğu içinde yer aldığı için imza kapsamındadır; byte stream'inde
+    // değiştirmek SignatureValue'yi geçersizleştirir
+    // (`SIG_CRYPTO_FAILURE`). Re-validation gerçek P1/P2 vakalarda her
+    // zaman patladığı için katman tamamen kaldırıldı; allow-list mantığı
+    // (gate v2.2) suppression için yeterli güveni sağlar. Detail için
+    // bkz. CHANGELOG "Re-validation katmanı kaldırıldı" entry'si.
 }

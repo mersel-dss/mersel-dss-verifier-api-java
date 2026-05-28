@@ -68,17 +68,25 @@ public class UnifiedVerificationController {
             
             @Parameter(description = "Doğrulama seviyesi: SIMPLE (basit) veya COMPREHENSIVE (kapsamlı)", 
                       schema = @Schema(allowableValues = {"SIMPLE", "COMPREHENSIVE"}))
-            @RequestParam(value = "level", defaultValue = "SIMPLE") String level) {
+            @RequestParam(value = "level", defaultValue = "SIMPLE") String level,
 
-        logger.info("Unified signature verification request received. Level: {}, File: {}", 
-                level, signedDocument.getOriginalFilename());
+            @Parameter(description = "Her imza için tüm BBB FAIL constraint'leri "
+                    + "(ROOT_CAUSE + DERIVED + CASCADE) failedConstraints alanına "
+                    + "eklensin mi? Default false — alan response'ta hiç görünmez; "
+                    + "operatör yalnız tek bir rootCause görür. true ise her imzaya "
+                    + "kategorize tam liste eklenir (audit/forensic için).")
+            @RequestParam(value = "includeFailedConstraints", defaultValue = "false") boolean includeFailedConstraints) {
+
+        logger.info("Unified signature verification request received. Level: {}, File: {}, includeFailedConstraints: {}",
+                level, signedDocument.getOriginalFilename(), includeFailedConstraints);
 
         VerificationLevel verificationLevel = parseVerificationLevel(level);
         
         VerificationResult result = advancedSignatureVerificationService.verifySignature(
                 signedDocument,
                 originalDocument,
-                verificationLevel
+                verificationLevel,
+                includeFailedConstraints
         );
 
         logger.info("Verification completed. Valid: {}, Type: {}", 
@@ -148,10 +156,11 @@ public class UnifiedVerificationController {
     public ResponseEntity<VerificationResult> verifyXAdES(
             @RequestParam("signedDocument") MultipartFile signedDocument,
             @RequestParam(value = "originalDocument", required = false) MultipartFile originalDocument,
-            @RequestParam(value = "level", defaultValue = "SIMPLE") String level) {
+            @RequestParam(value = "level", defaultValue = "SIMPLE") String level,
+            @RequestParam(value = "includeFailedConstraints", defaultValue = "false") boolean includeFailedConstraints) {
 
         logger.info("XAdES verification request (legacy endpoint)");
-        return verifySignature(signedDocument, originalDocument, level);
+        return verifySignature(signedDocument, originalDocument, level, includeFailedConstraints);
     }
 
     /**
@@ -172,10 +181,11 @@ public class UnifiedVerificationController {
     )
     public ResponseEntity<VerificationResult> verifyPAdES(
             @RequestParam("signedDocument") MultipartFile signedDocument,
-            @RequestParam(value = "level", defaultValue = "SIMPLE") String level) {
+            @RequestParam(value = "level", defaultValue = "SIMPLE") String level,
+            @RequestParam(value = "includeFailedConstraints", defaultValue = "false") boolean includeFailedConstraints) {
 
         logger.info("PAdES verification request (legacy endpoint)");
-        return verifySignature(signedDocument, null, level);
+        return verifySignature(signedDocument, null, level, includeFailedConstraints);
     }
 
     /**
@@ -197,10 +207,11 @@ public class UnifiedVerificationController {
     public ResponseEntity<VerificationResult> verifyCAdES(
             @RequestParam("signedDocument") MultipartFile signedDocument,
             @RequestParam(value = "originalDocument", required = false) MultipartFile originalDocument,
-            @RequestParam(value = "level", defaultValue = "SIMPLE") String level) {
+            @RequestParam(value = "level", defaultValue = "SIMPLE") String level,
+            @RequestParam(value = "includeFailedConstraints", defaultValue = "false") boolean includeFailedConstraints) {
 
         logger.info("CAdES verification request");
-        return verifySignature(signedDocument, originalDocument, level);
+        return verifySignature(signedDocument, originalDocument, level, includeFailedConstraints);
     }
 
     /**

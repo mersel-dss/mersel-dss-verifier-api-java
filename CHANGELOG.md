@@ -7,6 +7,624 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+### Fixed
+- **🐞 Tolerance gate v2.0/v2.1 — Cryptographic re-validation katmanı
+  tasarım hatasıydı; v2.2'de tamamen kaldırıldı (regression fix)** —
+  Gate v2.0 + v2.1, KamuSM/GİB legacy XAdES Type URI suppression'ına
+  bir 8. koşul olarak "cryptographic re-validation" eklemişti
+  ([`AdvancedSignatureVerificationService.attemptCryptographicReValidation`](src/main/java/io/mersel/dss/verify/api/services/verification/AdvancedSignatureVerificationService.java)
+  + [`LegacyTurkishXadesTypeUriDetector.normalizeTypeUri`](src/main/java/io/mersel/dss/verify/api/services/util/LegacyTurkishXadesTypeUriDetector.java)).
+  Mantık: allow-list onayından sonra detector yanlış-yazılmış Type URI'yi
+  standart varyantla değiştirir, XML yeniden DSS'e verilir; yeni verdict
+  `TOTAL_PASSED` ise "kanıt-bazlı onay" sayılır.
+
+  **Tasarım hatası**: `<ds:Reference Type="...">` attribute değeri
+  `<ds:SignedInfo>` bloğunda yer alır ve imza kapsamındadır;
+  `SignatureValue = sign(canonicalize(SignedInfo))`. Byte stream'inde
+  Type attribute'sini değiştirmek canonical SignedInfo byte dizisini
+  değiştirir, dolayısıyla mevcut SignatureValue artık geçerli değildir
+  ve DSS pipeline `INDETERMINATE / SIG_CRYPTO_FAILURE` döner. Gerçek
+  P1 (`.xsd` varyantı) ve P2 (`v1.3.2#`, `v1.4.1#` versiyonlu varyant)
+  vakalarda re-validation **her zaman patlardı**; tek "başarılı" senaryo
+  birim testlerin mock'ladığı `ReValidationResult("PASSED")` çağrısıydı.
+  Mock-driven yanılgı tipik vakası: production-grade test eksikti,
+  hata gerçek XML üzerinden ancak son kullanıcı raporuyla yakalandı.
+
+  **Etki**: Gate v2.0/v2.1 production'a girdiği andan itibaren tüm
+  KamuSM/GİB P1/P2 imzaları (yani **yaygın yerleşik senaryo**)
+  tolerance gate v2'ye girdiklerinde re-validation katmanında
+  `SIG_CRYPTO_FAILURE` alıp **suppression reddedilmiş** olarak
+  raporlanıyordu — kullanıcılar daha önce VALID gördükleri Mali Mühür
+  imzaları aniden INVALID alıyorlardı. Önceki sürümlerde (gate v1.x)
+  allow-list mantığı tek başına yeterliydi, bu vakalar VALID
+  raporlanıyordu.
+
+  **Fix**: Katman ve ona bağlı tüm artefakt'lar silindi:
+  - `AdvancedSignatureVerificationService`:
+    - `attemptCryptographicReValidation` metodu
+    - `ReValidationContext` ve `ReValidationResult` inner class'ları
+    - `recordReValidationDuration` helper'ı
+    - `METRIC_TOLERANCE_REVALIDATION_SECONDS` constant'ı
+    - `bumpToleranceApplied(String reValidationVerdict)` →
+      `bumpToleranceApplied()` (parametresiz)
+    - `evaluateTrLegacyXadesTolerance(... ReValidationContext ctx)` →
+      `(... byte[] originalXmlBytes)` (sadece SHA-256/size hesaplaması için)
+    - Class-level Javadoc'taki Layer 3 atıfları "tasarım hatası" notuyla
+      değiştirildi
+    - `TOLERANCE_GATE_VERSION = "v2.1"` → `"v2.2"` (allow-list-only)
+  - `LegacyTurkishXadesTypeUriDetector`:
+    - `normalizeTypeUri` metodu
+    - `replaceAllTypeAttrValue` helper'ı
+    - `CANONICAL_SIGNED_PROPERTIES_TYPE_URI` constant'ı
+  - `AppliedSuppression` (model):
+    - `reValidationVerdict` alanı + getter/setter
+    - Audit constructor 15-args → 14-args
+  - `VerificationConfiguration`:
+    - `trLegacyXadesReValidationEnabled` field/property/getter/setter
+    - `trLegacyXadesReValidationFailClosed` field/property/getter/setter
+  - `application.properties`:
+    - `verification.tr-legacy-xades-re-validation-enabled`
+    - `verification.tr-legacy-xades-re-validation-fail-closed`
+    - Yerine "v2.2'de kaldırıldı" açıklayıcı yorum bloğu
+  - `devops/docker/docker-compose.yml`:
+    - `TR_LEGACY_XADES_RE_VALIDATION` env var
+  - `devops/monitoring/prometheus/alerts.yml`:
+    - `MdssToleranceReValidationErrorRate` alarm'ı
+    - `MdssToleranceReValidationLatencyHigh` alarm'ı
+    - `mdss_tolerance_applied_total` metric'inden `re_validation` label
+  - Testler:
+    - `AdvancedSignatureVerificationServiceReValidationFailClosedTest`
+      tamamen silindi
+    - `LegacyTurkishXadesTypeUriDetectorNormalizationTest` tamamen silindi
+    - `AppliedSuppressionAuditMetadataTest` 14-args constructor'a güncellendi
+  - Dokümantasyon:
+    - [`MDSS-XADES-LEGACY-TR-TYPE-URI.md`](docs/suppressions/MDSS-XADES-LEGACY-TR-TYPE-URI.md):
+      "Gate v2.2 — allow-list-only" başlığı, 8 koşul → 7 koşul, tarihsel
+      not blokları, audit JSON örnekleri, metric/alarm tabloları,
+      FAQ + changelog girişleri
+
+  **Backward compatibility**: Eski JSON kayıtlarında `reValidationVerdict`
+  alanı veya `evidence.expectedTypeUri` görülürse Jackson bunları
+  sessizce yok sayar (unknown field). Eski env var'lar
+  (`TR_LEGACY_XADES_RE_VALIDATION`, `TR_LEGACY_XADES_RE_VALIDATION_FAIL_CLOSED`)
+  Spring Boot tarafından sessizce ignore edilir.
+
+  **Gate v2.2 (mevcut) — Allow-list-only mantık**: 7 katmanlı süzgeç
+  (config + indication + subIndication + signatureIntact + signatureValid
+  + observedFailureKeys ⊆ allow-list + pattern eşleşmesi) tek başına
+  yeterli güveni sağlar. KeyUsage / chain / revocation freshness /
+  policy hash gibi tüm gerçek FAIL'leri yakalar — `BBB_SAV_ISQPMDOSPP`
+  dışında **herhangi** bir FAIL key gate'i kapatır.
+
+  **Regresyon kanıtı**: 397 test PASS (önceden 418'di; ~21 test
+  re-validation/normalization mock'larına dayanıyordu, silindi).
+  End-to-end kanıt: `20e854a3-1cf2-43db-a103-48d9c173d141.xml` (3 günlük
+  KamuSM Mali Mühür receipt-advice imzası, Type URI =
+  `http://uri.etsi.org/01903/v1.3.2#SignedProperties` — P2 patolojisi)
+  v0.4.2 build'inde gate v2.0/v2.1 ile INVALID dönüyordu; v2.2 ile
+  `valid:true`, `gateVersion:"v2.2"`, audit kaydında temiz allow-list
+  kanıtıyla VALID dönüyor.
+
+- **🐛 Triple Validation Bug — `SignatureVerificationService` aynı dokümanı
+  3 kez DSS pipeline'ından geçiriyordu** —
+  [`SignatureVerificationService.verifySignature`](src/main/java/io/mersel/dss/verify/api/services/verification/SignatureVerificationService.java)
+  içinde `validator.validateDocument()` üç ayrı yerden çağrılıyordu:
+  ana akış (line 125), `populateSignatureInfo` içinde sertifika bilgisi
+  almak için (line 283), `determineSignatureType` içinde imza formatı
+  almak için (line 374). Her çağrı **DSS pipeline'ın tamamını** yeniden
+  koşturuyordu (BBB + AdES + LTV/LTA + OCSP/CRL fetch dahil) —
+  performans olarak 3x maliyet, ayrıca **tutarlılık riski**: OCSP
+  responder farklı saniyede farklı cevap verebilir, `BestSignatureTime`
+  hesaplaması saniye-seviyesi varyasyon gösterebilir, KeyUsage gibi
+  constraint'lerin verdict'i değişebilir (race-condition'a açık).
+
+  **Etki**: Bu service şu an hiçbir controller'a bağlı değil (prod
+  traffic'i `AdvancedSignatureVerificationService` taşıyor, o
+  doğru kalıpta yazılmış). Ancak future endpoint'ler (lite endpoint,
+  batch API) burayı çağırdığı an aktif olacaktı; ayrıca kod organizasyonu
+  olarak yanlış kalıp (copy-paste tehlikesi) idi.
+
+  **Fix**: `Reports` nesnesini ana method'da bir kez alıp
+  `parseVerificationResult(Reports reports, VerificationLevel level)`
+  method'una parametre olarak iletiyoruz. Downstream yardımcılar
+  (`populateSignatureInfo`, `determineSignatureType`, `createValidationDetails`)
+  bu tek nesneden okur. DSS pipeline tek seferde koşar — Single-Validation
+  Contract. Sertifika bilgisi artık `reports.getDiagnosticData()` ile
+  daha önce build edilmiş DiagnosticData üzerinden çekiliyor; imza tipi
+  daha önce alınmış `SimpleReport` üzerinden okunuyor.
+
+  **Regresyon kanıtı**:
+  [`SignatureVerificationServiceSingleValidationTest`](src/test/java/io/mersel/dss/verify/api/services/verification/SignatureVerificationServiceSingleValidationTest.java)
+  6 senaryoda kontratı kilitler:
+  1. Happy path tek imza — `getDiagnosticData()` tam **1 kez** (önceden
+     2 kez idi: bir `populateSignatureInfo`, bir `determineSignatureType`).
+  2. Çoklu imza (3 sig) — `getDiagnosticData()` tam N kez (her signature
+     loop iterasyonunda bir kez, ek pipeline tetikleme YOK).
+  3. COMPREHENSIVE seviye — `createValidationDetails` ek
+     `getDiagnosticData()` tetiklemez.
+  4. İmza bulunmayan doküman — `getDiagnosticData()` **never** (early
+     return).
+  5. InOrder — SimpleReport önce, DiagnosticData sonra (kanonik sıra).
+  6. `determineSignatureType` SimpleReport'tan okuma — pipeline yeniden
+     tetiklenmez.
+
+  Yarın biri tekrar `validator.validateDocument()` çağrısı sızdırırsa
+  veya bir ek `reports.getDiagnosticData()` cycle'ı eklerse bu testler
+  patlar.
+
+### Security
+- **🔒 Crypto-modern policy hardening — `kamusm-signer-strict` ve
+  `kamusm-strict` profillerinde 4 üretim seviyesi sıkılaştırma
+  (BREAKING)** — Her iki üretim policy XML'inde aşağıdaki dört kural
+  değiştirildi; profil ETSI EN 319 102-1 / SOG-IS 2026+ paritesi ile
+  uyumlu hale getirildi. Mevcut KamuSM Mali Mühür sertifikaları
+  (RSA-2048, SHA-256) etkilenmez; etkilenen senaryolar üretim
+  ortamında zaten istenmeyen vakalar.
+
+  | Constraint | Önceki | Yeni | Niçin |
+  |---|---|---|---|
+  | `AcceptableDigestAlgo` | `MD5`, `SHA1` listede | İkisi de silindi | MD5 (2004-08-01) ve SHA1 (2012-08-01) tarihsel olarak çoktan kırık. `AcceptableDigestAlgo`'da kalmak "yarın 1 satır config ile yeniden açılabilir" kapısı bırakıyordu. `AlgoExpirationDate` altındaki entries forensic için korunur — pratikte unreachable. |
+  | `MiniPublicKeySize` (RSA, RSASSA-PSS) | `786` bit | `2048` bit | `786` typo olası, kuralın gerçek niyeti 768 idi — her iki değer de 1990'lar standardı. NIST SP 800-57 ≥ 2030 yönelimi 3072 bit; 2048 bugün kabul edilen minimum. KamuSM Mali Mühür default'u zaten 2048. |
+  | `RevocationFreshness` (signer, counter-sig signer) | `IGNORE` | `FAIL` `Unit=HOURS` `Value=24` | IGNORE = "1 yıllık bayat CRL bile geçer". KamuSM OCSP real-time, CRL 7 günlük ritim; 24h üst sınır eIDAS-QES paralelidir. Stale revocation ile iptal edilmiş sertifika tolere edilemez. |
+  | `RevocationFreshness` (TSA signer) | `IGNORE` | `WARN` `Unit=HOURS` `Value=168` | TSA CRL haftalık ritimle yenilenir, iptal nadirdir. 7 gün operasyonel pencerede tipik TSA ritmi ile uyumlu, bayat veri uyarısı için yeterli ufuk. CA/intermediate katmanlarında freshness IGNORE kalır (bakım pencereleri yanlış pozitif yaratmasın). |
+  | `PolicyHashMatch` | `WARN` | `FAIL` | İmza bir signature policy referansı taşıyorsa hash imza zamanında ne idiyse o olmalı. WARN, "policy değiştirildi ama imza eski hash'le bağlı" durumunu sessize alır — eIDAS-QES non-repudiation iddiası bu kontrol ile ayakta durur. |
+
+  **Operasyonel etki**: Her dört kural da modern KamuSM toolchain'i ile
+  uyumlu. Etkilenebilecek senaryolar:
+  1. Üreteç MD5/SHA1 hash kullanan eski (2010 öncesi) e-faturalar →
+     `INDETERMINATE/CRYPTO_CONSTRAINTS_FAILURE` (önceden de
+     `AlgoExpirationDate` tarafından reddedilebiliyordu, fark
+     tutarsızlığın kapatılması).
+  2. RSA < 2048 bit eski test sertifikalarıyla imzalanmış belgeler →
+     `CRYPTO_CONSTRAINTS_FAILURE`. KamuSM prod sertifikaları zaten
+     RSA-2048+.
+  3. CRL/OCSP altyapısı 24h+ kesintiye uğramışken imzalanmış belgeler
+     → revocation kontrolü `INDETERMINATE`. Bu vakada manuel inceleme
+     ve gerekirse profil downgrade ile çözülür.
+  4. KamuSM/GİB resmi signature policy'sini deklare eden imzalar hash
+     uyumsuzluğunda artık FAIL — policy dokümanı sabit hash ile
+     yayınlandığı için bu pratikte saldırı tespiti.
+
+  **Geriye dönüş**: Profili `dss.policy.profile=legacy-historic` veya
+  özel `dss.policy.path=file:/path/to/custom.xml` ile override mümkün.
+  Bu sıkılaştırmalar 2026'da default prod seviyesidir; tarihsel
+  belge arşivlerini doğrulamak için ayrı bir profil kurmak makuldür.
+
+- **🛡️ Legacy-TR XAdES suppression gate v2.1 — Re-validation ERROR
+  fail-closed (safe-by-default hardening)** — Cryptographic re-validation
+  katmanı (gate v2 katman 3) Java exception atarsa (örn. DSS pipeline'ında
+  `NullPointerException`, `IOException`, JAXB hatası, `OutOfMemoryError`,
+  `ConcurrentModificationException`) gate v2.0'da **konservatif olarak yine
+  tolere ediyordu** (fail-open) — "operatör log'a bakıp inceleyebilir"
+  semantiği. v2.1 bu davranışı **fail-closed**'a çevirdi (safe-by-default):
+  re-validation exception atarsa tolerance **reddedilir**, DSS'in orijinal
+  `INDETERMINATE/SIG_CONSTRAINTS_FAILURE` verdict'i korunur.
+
+  **Niçin değişti?** Re-validation exception atması transient bir hata
+  DEĞİLDİR — DSS upgrade regresyonu, classpath uyumsuzluğu, memory
+  pressure gibi operasyonel inceleme gerektiren senaryoları işaret eder.
+  ETSI EN 319 102-1 ruhuna uygun olarak "kanıt yoksa kabul etme" prensibi
+  uygulanır. Bu tip belirsiz durumlarda imzayı tolere etmek yerine
+  reddetmek güvenli default.
+
+  **Operatör escape hatch**: Eski v2.0 davranışını isteyenler explicit
+  olarak `verification.tr-legacy-xades-re-validation-fail-closed=false`
+  (env `TR_LEGACY_XADES_RE_VALIDATION_FAIL_CLOSED=false`) set edebilir;
+  startup log'unda fail-open seçimi uyarısı görünür, audit log'da
+  `reValidationVerdict = "ERROR:<ClassName>"` kalır. Bu yalnız DSS
+  upgrade regresyonu sırasında geçici iş sürekliliği için önerilir,
+  production default için ASLA.
+
+  **Metric & alarm**: `mdss_tolerance_rejected_total{reason="re_validation_error"}`
+  metric artık fiilen artar (önceden `applied_total` artıyordu).
+  Alertmanager `MdssToleranceReValidationErrorRate` alarmı sustained
+  >10% ERROR rate için zaten kuruluydu — kuralın gerçek aksiyonu artık
+  fail-closed reddetme. Audit gate versionu `v2.0 → v2.1` bump edildi;
+  eski v2.0 kayıtları tarihsel forensic için orijinal sürümleriyle
+  dokunulmaz kalır.
+
+  9 yeni unit test
+  ([`AdvancedSignatureVerificationServiceReValidationFailClosedTest`](src/test/java/io/mersel/dss/verify/api/services/verification/AdvancedSignatureVerificationServiceReValidationFailClosedTest.java))
+  davranışı sabitler: fail-closed default kontratı, gate version v2.1,
+  ERROR + fail-closed → null (6 farklı exception sınıfı), ERROR +
+  fail-open → AppliedSuppression with ERROR verdict, PASSED happy-path
+  her iki flag'le de tolerate eder, FAILED her iki flag'le de reject
+  eder (re-validation kanıt-bazlı katmanın değişmez davranışı), DISABLED
+  (re-val kapalı) durumunda fail-closed flag etkisiz.
+
+- **`SigningCertificate.KeyUsage` artık FAIL — şifreleme sertifikasıyla
+  imzalama vakası kapatıldı (BREAKING)** — Hem `kamusm-signer-strict-constraint.xml`
+  (default) hem `kamusm-strict-constraint.xml` profilinde imzacı sertifika
+  KeyUsage kontrolü Level=`WARN`'dan Level=`FAIL`'e yükseltildi; kabul edilen
+  bit kümesi `nonRepudiation` VEYA `digitalSignature` (DSS bunu OR olarak
+  değerlendirir, yani EN AZ BİRİ varsa OK). Aynı değişiklik
+  `CounterSignatureConstraints.SigningCertificate.KeyUsage` için de yapıldı —
+  sayaç imzalar ana imzacıyla aynı QC kurallarına tabi.
+
+  **Operasyonel etki**: KamuSM Mali Mühür ekosisteminde kurumlara iki ayrı
+  sertifika veriliyor — imzalama (`KeyUsage = digitalSignature` ve/veya
+  `nonRepudiation`) ve şifreleme (`KeyUsage = keyEncipherment + keyAgreement`,
+  `EKU = TLS Web Client Authentication`). Bazı imzalama araçları yanlışlıkla
+  ikincisini XML imzasında kullanıyor; üretimde
+  `99967f00-1cef-467c-99d2-65e29c7dfb68.xml` vakası bu durumu gösterdi.
+  Önceki WARN konfigürasyonunda DSS bu hatayı yalnızca uyarıya düşürüyor ve
+  imza kalan koşullar geçtiği için VALID görünebiliyordu; TÜBİTAK
+  doğrulayıcısı ise QC kuralı gereği FAIL veriyordu. Yeni FAIL seviyesi iki
+  doğrulayıcının verdict'ini paralel hâle getirir.
+
+  **Kimleri etkiler?** Şifreleme amaçlı verilmiş Mali Mühür sertifikalarıyla
+  imzalanmış e-Belge'ler (e-Fatura, e-İrsaliye, ReceiptAdvice vb.) bu
+  hardening sonrası `INDETERMINATE`/`INVALID` olarak raporlanır. CA
+  Certificate'in `keyCertSign` kontrolü zaten FAIL'di; o değişmedi.
+
+- **🛡️ Legacy-TR XAdES suppression gate v2.0 — Universal Allow-List
+  (security hardening, gizli açık kapatıldı)** —
+  `MDSS-XADES-LEGACY-TR-TYPE-URI` toleransı gate v1.x'te yalnız BBB SAV
+  beyaz-listesi (`isOnlyBbbSavFailureMessageDigestOrSignedProperties`) ve
+  XCV defense-in-depth (`hasAnyBbbXcvFailure`) helper'larıyla çalışıyordu.
+  **FC/ISC/VCI/CV/PSV blokları kontrol edilmiyordu** — saldırgan
+  **hash mismatch (CV blok `BBB_CV_IRDOI`) yaratıp** üzerine legacy Type URI
+  yazım hatası eklerse, gate kapanmıyor ve manipüle edilmiş içerik
+  yanlışlıkla VALID görünebiliyordu. Gate v2 bu açığı kapatır:
+
+  - **Universal Allow-List**: Yeni helper
+    [`collectAllBbbFailureKeys`](src/main/java/io/mersel/dss/verify/api/services/verification/AdvancedSignatureVerificationService.java)
+    DSS BBB pipeline'ındaki TÜM blokları (FC/ISC/VCI/CV/SAV/XCV-top/SubXCV/PSV)
+    tek noktada gezer; gözlenen `NOT_OK` constraint key set'i
+    `ALLOWED_TOLERANCE_FAILURE_KEYS = {BBB_SAV_ISQPMDOSPP}`'nin alt-kümesi
+    olmalıdır. Tek izinli key bu; herhangi başka bir blokta tek bir FAIL bile
+    gate'i kapatır. Eski `isOnlyBbbSavFailureMessageDigestOrSignedProperties`
+    ve `hasAnyBbbXcvFailure` helper'ları silindi (artık tek bir whitelist
+    mantığıyla kapsanıyor).
+  - **SubIndication EnumSet** (taxonomy white-list lock):
+    `ALLOWED_TOLERANCE_SUB_INDICATIONS = EnumSet.of(SIG_CONSTRAINTS_FAILURE)`.
+    DSS yarın yeni SubIndication eklerse default tolere edilmez. Asla bypass
+    edilmeyen örnekler: `HASH_FAILURE`, `FORMAT_FAILURE`,
+    `CHAIN_CONSTRAINTS_FAILURE`, `CRYPTO_CONSTRAINTS_FAILURE`, `EXPIRED`,
+    `REVOKED`, `NO_POE`.
+  - **Cryptographic re-validation** (kanıt-bazlı üçüncü katman): Allow-list
+    onayından sonra yeni
+    [`LegacyTurkishXadesTypeUriDetector.normalizeTypeUri`](src/main/java/io/mersel/dss/verify/api/services/util/LegacyTurkishXadesTypeUriDetector.java)
+    ile Type URI standart varyantla
+    (`http://uri.etsi.org/01903#SignedProperties`) değiştirilip XML aynı
+    CertificateVerifier + policy + detached content konfigürasyonuyla DSS'e
+    yeniden verilir. Yeni verdict `TOTAL_PASSED` değilse tolerance reddedilir
+    — yapılan tek değişiklik Type URI olsa bile başka bir gizli problem
+    yakalanır. Tipik ek maliyet ~150–250ms (yalnız suppression
+    candidate'ları için). Default açık; config flag
+    `verification.tr-legacy-xades-re-validation-enabled` (ENV
+    `TR_LEGACY_XADES_RE_VALIDATION`).
+  - **Forensic audit metadata**:
+    [`AppliedSuppression`](src/main/java/io/mersel/dss/verify/api/models/AppliedSuppression.java)
+    model'ine 6 yeni alan eklendi: `gateVersion` (`v2.0`),
+    `allowedFailureKeys`, `observedFailureKeys`, `documentSha256`,
+    `documentSizeBytes`, `reValidationVerdict`
+    (`PASSED`/`DISABLED`/`ERROR:…`). Backward compatible — eski 8-args
+    constructor null bırakır; yeni 14-args constructor forensic alanları
+    doldurur. Set'ler defensive copy + `Collections.unmodifiableSet` ile
+    audit kaydının kirletilmesi engellenir.
+  - **Prometheus telemetry**: 3 metric ailesi MeterRegistry'e yazılır
+    (best-effort; null güvenli):
+    - `mdss_tolerance_applied_total{code,gate_version,re_validation}`
+    - `mdss_tolerance_rejected_total{code,gate_version,reason}` (10 farklı
+      `reason` label'ı: `indication_not_indeterminate`,
+      `sub_indication_not_allowed`, `unallowed_failure_key`, vb.)
+    - `mdss_tolerance_revalidation_seconds` (Timer)
+  - **Alertmanager kuralları** (`devops/monitoring/prometheus/alerts.yml`):
+    `MdssToleranceUsageSpike`, `MdssToleranceReValidationErrorRate`,
+    `MdssToleranceReValidationLatencyHigh`, `MdssToleranceRejectionRateHigh`.
+
+  Detaylar: [docs/suppressions/MDSS-XADES-LEGACY-TR-TYPE-URI.md](docs/suppressions/MDSS-XADES-LEGACY-TR-TYPE-URI.md).
+
+### Added
+- **DSS i18n locale konfigürasyonu — Türkçe artık varsayılan dil
+  (TRUSTED_SERVICE_STATUS dahil tüm BBB mesajları)** — DSS validation
+  pipeline'ı tüm BBB constraint mesajlarını
+  (`BBB_XCV_ISCGKU`, `TRUSTED_SERVICE_STATUS`, `QUAL_HAS_GRANTED`, vb.)
+  artık varsayılan olarak **Türkçe** doldurur. Yapı:
+  - **Yeni property**: `verification.i18n-locale` (env var
+    `VERIFICATION_I18N_LOCALE`); default `tr`. Geçerli değerler herhangi
+    bir BCP-47 tag (`tr`, `en`, `en-US`, `fr`, `tr-TR`, ...).
+  - **Yeni Spring config**:
+    [`I18nProviderConfiguration`](src/main/java/io/mersel/dss/verify/api/config/I18nProviderConfiguration.java)
+    config'i okur, `Locale` bean'i expose eder ve startup-time WARN
+    log'u basar (geçersiz tag verildiğinde sessiz İngilizce'ye DEĞİL,
+    explicit Türkçe default'a düşer — operatörü yanıltmamak için).
+  - **DSS validator wiring**:
+    `AdvancedSignatureVerificationService` ve `SignatureVerificationService`
+    her validator yaratımından sonra `validator.setLocale(dssValidationLocale)`
+    çağırır; DSS pipeline `I18nProvider`'ını configured locale ile
+    kurar ve tüm `XmlConstraint.error.value` alanlarını Türkçe doldurur.
+  - **TR çeviri dosyası — UTF-8 source-of-truth**:
+    [`src/main/resources/dss-messages_tr.properties`](src/main/resources/dss-messages_tr.properties)
+    standart Spring Boot resource konumunda, standart Java
+    `ResourceBundle` formatında, **DSS 6.3
+    `dss-messages.properties` dosyasındaki 823 anahtarın TAMAMI**
+    Türkçe'ye çevrildi (BBB FC/CV/ICS/RFC, ADEST, BSV, LTV, ARCH,
+    ACCM, SAV, TAV, VCI, XCV — top-level + tüm SubXCV constraint'ler,
+    TSL, PCV, PSV, TSV, QUAL_TL, QUAL_CERT/QC/QSCD, QWAC, TLS
+    Certificate Binding, tokens, additional info template'leri, BBB
+    block başlıkları, validation süreç adları, ETSI EN 319 102-1
+    semantics, custom değişkenler). Türkçe karakterler **doğrudan**
+    UTF-8 olarak yazılır (İmza, Sertifika, güven, geçerlilik, ...) —
+    IDE'de temiz okunur. Header bölümü i18n kullanım talimatlarını,
+    build pipeline davranışını, fallback zinciri ve `MessageFormat`
+    placeholder kurallarını dokumante eder.
+  - **Build pipeline (UTF-8 → ASCII escape)**: `pom.xml`'e iki adım
+    eklendi:
+    1) `<build><resources>` bloğunda `dss-messages*.properties`
+       dosyaları `maven-resources-plugin`'in default copy'sinden
+       **exclude** edildi — UTF-8 byte'ların runtime'da mojibake'e
+       ("GÃ¼ven" yerine "Güven") yol açmasını önlemek için.
+    2) `maven-antrun-plugin` + Apache Ant 1.10.x dependency'si:
+       `process-resources` phase'inde Ant'in `<native2ascii>` task'ı
+       `src/main/resources/dss-messages*.properties` dosyalarını okur,
+       non-ASCII karakterleri Unicode escape (`\uXXXX`) ile değiştirir
+       ve `target/classes/dss-messages*.properties` olarak yazar.
+
+    Tek kanal (yalnız antrun) sayesinde IDE incremental build'lerinde
+    bile encoding tutarlı. Runtime'da Java `PropertyResourceBundle`
+    JVM'in encoding davranışından bağımsız olarak doğru çevirileri
+    okur. Geliştirici manuel native2ascii pass'i çalıştırmak zorunda
+    değil; üretilen ASCII sürüm `target/`
+    altında olduğundan kaynak kontrolüne girmez. Plugin Java 8+
+    uyumlu Ant 1.10.x kullanır (JDK 9+'da kaldırılan
+    `sun.tools.native2ascii` toolchain'ine bağımlı DEĞİL).
+  - **Fallback davranışı**: `dss-messages_tr.properties` içinde eksik
+    bıraktığımız anahtarlar otomatik olarak DSS jar default'una
+    (`dss-messages.properties` — İngilizce) düşer. Boş çıktı oluşmaz;
+    gelecekte DSS yeni anahtar eklerse İngilizce gözükür ve gradual
+    translation desteklenir.
+  - **Encoding notu**: Java `PropertyResourceBundle` JVM'e göre
+    UTF-8 / ISO-8859-1 davranışı değişebildiği için TR çevirileri
+    runtime'da Unicode escape (`\uXXXX`) formatına dönüştürülür —
+    encoding'den bağımsız portable. Source dosyası UTF-8 (geliştirici
+    rahatlığı), build pipeline `native2ascii` ile escape üretir
+    (yukarıdaki "Build pipeline" maddesi).
+  - **Statik kodlar**: `TRUSTED_SERVICE_STATUS`, `TRUST_SERVICE_NAME`,
+    `TRUSTED_SERVICE_TYPE` gibi DSS i18n anahtarları parametre olarak
+    ETSI URI / enum kodu (`http://uri.etsi.org/TrstSvc/Svcstatus/granted`,
+    `OK`, `INVALID`, vb.) alır; bu URI/enum değerleri DSS tarafında
+    çevrilmez ve `validationErrors` çıktısında orijinal kod olarak
+    görünür — "statik kodları response'da direkt dönelim" gereksinimi
+    bu sayede karşılanır.
+
+  Örnek çıktı (Türkçe locale aktif):
+  ```json
+  "validationErrors": [
+    "[BBB_XCV_ISCGKU] Sertifika beklenen anahtar kullanım alanına (KeyUsage) sahip değil — imza için yetkilendirilmemiş!",
+    "[TRUSTED_SERVICE_STATUS] Güven hizmeti durumu : http://uri.etsi.org/TrstSvc/Svcstatus/granted"
+  ]
+  ```
+
+  17 yeni unit test
+  ([`I18nLocaleConfigurationTest`](src/test/java/io/mersel/dss/verify/api/config/I18nLocaleConfigurationTest.java))
+  davranışı sabitler: locale parsing, default fallback, BCP-47 region tag,
+  geçersiz tag handling, classpath bundle resolution, TR override sızması,
+  eksik anahtar için English fallback.
+
+- **`validationErrors` artık BBB constraint kodlarını insan-okur mesajla
+  birlikte taşıyor** — DSS'in opaque BBB anahtarları
+  (`BBB_XCV_ISCGKU`, `BBB_FC_IEFF`, `BBB_SAV_ISCDC` vb.) doğrulayıcı
+  yanıtında `[KEY] kısa açıklama` formatında listeleniyor. Mesaj kaynağı
+  DSS `dss-i18n` paketi (transitive olarak `dss-validation` üzerinden
+  geliyor; ek dependency YOK): pipeline her FAIL constraint için
+  `XmlConstraint.error.value` alanını
+  [`I18nProvider`](https://github.com/esig/dss/tree/master/dss-i18n)
+  ile **configured locale** (default `tr`) ile doldurulmuş halde sağlıyor
+  — biz onu yalnızca topluyoruz.
+
+  Yeni helper [`AdvancedSignatureVerificationService#collectFailingBbbConstraintMessages`](src/main/java/io/mersel/dss/verify/api/services/verification/AdvancedSignatureVerificationService.java)
+  Basic Building Blocks içindeki `FC` (Format Checks), `ISC` (Signing Cert
+  Identification), `VCI` (Validation Context Init), `CV` (Cryptographic
+  Verification), `SAV` (Signed Attributes Validation), `XCV` (X509
+  Certificate Validation — top-level + her `SubXCV` zincir katmanı) ve
+  `PSV` (Past Signature Validation) bloklarını gezip `NOT_OK` constraint'leri
+  toplar. Constraint `additionalInfo` doluysa (örn. CN, serial,
+  expiry tarihi) " — " ile birleştirilir; aynı satır birden fazla kez
+  eklenmez (LinkedHashSet ile sıra korunur, dedup uygulanır).
+
+  Örnek çıktı (şifreleme sertifikasıyla imzalanmış e-Belge, varsayılan TR locale):
+  ```json
+  "validationErrors": [
+    "İmza geçersiz: INDETERMINATE (CHAIN_CONSTRAINTS_FAILURE)",
+    "[BBB_XCV_ISCGKU] Sertifika beklenen anahtar kullanım alanına (KeyUsage) sahip değil — imza için yetkilendirilmemiş!"
+  ]
+  ```
+
+  İngilizce'ye geçmek için `verification.i18n-locale=en`.
+
+  Operatör/son kullanıcı opaque kodun ne demek olduğunu artık tek bakışta
+  görür — eski response'da yalnız `INDETERMINATE (CHAIN_CONSTRAINTS_FAILURE)`
+  cümlesi vardı, kök neden lookup gerektiriyordu. Tolerans/rejection
+  uygulanan akışlar etkilenmedi: legacy-TR XAdES suppression devredeyken
+  zaten errors listesi boş; `MDSS-…` rejection enrichment ile satır birlikte
+  görünür.
+
+- **Yapısal hata alanı: default tek kök neden + opt-in kategorize liste —
+  `signatures[i].rootCause: FailedConstraint` (+ opt-in
+  `signatures[i].failedConstraints: List<FailedConstraint>`)** — Önceden
+  BBB FAIL satırları yalnız `validationErrors: ["[BBB_XCV_ISCGKU] ..."]`
+  formatında tek-satır string olarak geliyordu (regex parse gerekiyordu).
+  Yeni nihai kontrat iki katmanlı: default davranış sadece tek bir
+  `rootCause` döner (UX odaklı — operatör tek somut sebep görür); audit
+  ihtiyacı için `?includeFailedConstraints=true` opt-in parametre ile
+  tüm pipeline satırları kategorize halde dönülür.
+
+  Default kontrat:
+  [`SignatureInfo.rootCause: FailedConstraint`](src/main/java/io/mersel/dss/verify/api/models/SignatureInfo.java)
+  (ve simetrik
+  [`TimestampInfo.rootCause`](src/main/java/io/mersel/dss/verify/api/models/TimestampInfo.java))
+  DSS i18n bundle anahtarını ve locale-çevrili insan mesajını ayrı
+  alanlar hâlinde **tek** nesne olarak taşır. ETSI EN 319 102-1
+  terminolojisinde DSS DetailedReport içindeki `<Constraint Status="NOT_OK">`
+  elementleri "*failed constraints*" olarak adlandırılır; `rootCause`
+  bunlardan tek bir kök neden seçer.
+
+  ```json
+  "rootCause": {
+    "key": "BBB_XCV_ISCGKU",
+    "message": "İmzacı sertifikası, beklenen anahtar kullanım alanına (KeyUsage) sahip değil! — Anahtar kullanımı : [KEY_ENCIPHERMENT, KEY_AGREEMENT]"
+  }
+  ```
+
+  **Filter kuralları (muhafazakâr):**
+  - **XCV roll-up**: XCV-top bloğundaki `BBB_XCV_SUB` /
+    `BBB_XCV_ICTIVRSC` summary constraint'leri SubXCV'lerden biri NOT_OK
+    ise filtrelenir (üst-blok yalnız alt-bloğun yansımasıdır).
+  - **SAV/CV cascade**: SAV/CV bloklarındaki NOT_OK constraint'ler
+    XCV bloğunun `Conclusion.Indication`'ı INDETERMINATE/FAILED ise
+    filtrelenir (sertifika context'i kullanılamaz hale gelmiş; bu
+    blokların "kontrol edilemedi" üretmesi doğal yan ürün).
+
+  **Birden fazla gerçek kök neden** (örn. signer + counter signer
+  ayrı KeyUsage failure): DSS gezme sırasına göre ilk satır seçilir
+  (deterministik: FC → ISC → VCI → CV → SAV → XCV-top → SubXCV[0..n]
+  → PSV). Eksiksiz detay isteyen operatör
+  `?includeFailedConstraints=true` ile kategorize tam listeyi
+  alabilir (aşağıya bkz.).
+
+  **Defansif fallback**: Listede hiç ROOT_CAUSE satırı yoksa (DSS
+  yeni sürümünde whitelist eksik veya beklenmeyen blok ilişkisi → tüm
+  satırlar DERIVED/CASCADE sınıflanmış), `selectRootCause` defansif
+  olarak listenin ilk elemanına düşer. Operatör hiçbir zaman bilgisiz
+  kalmaz; yanlış pozitif sınıflandırma nedeniyle gerçek kök nedenleri
+  gizleme riski yok.
+
+  Implementasyon:
+  [`AdvancedSignatureVerificationService.collectFailingBbbConstraintDetails`](src/main/java/io/mersel/dss/verify/api/services/verification/AdvancedSignatureVerificationService.java)
+  tüm BBB FAIL constraint'lerini `classifyFailure` ile kategorize
+  edilmiş tek bir listede döner; `selectRootCause(List)` ROOT_CAUSE
+  satırını seçer; helper'lar `hasAnySubXcvFailure`,
+  `isIndeterminateOrFailed`. `BbbBlockKind` enum + `XCV_ROLL_UP_KEYS`
+  whitelist iç state. Unit testler
+  ([`AdvancedSignatureVerificationServiceFailedConstraintTest`](src/test/java/io/mersel/dss/verify/api/services/verification/AdvancedSignatureVerificationServiceFailedConstraintTest.java),
+  [`AdvancedSignatureVerificationServiceSelectRootCauseTest`](src/test/java/io/mersel/dss/verify/api/services/verification/AdvancedSignatureVerificationServiceSelectRootCauseTest.java)):
+  kanonik üç-aşamalı zincir üç kategoride doğru etiketlenir,
+  BBB_XCV_SUB ve BBB_XCV_ICTIVRSC DERIVED'a düşer, SAV/CV CASCADE
+  olur, XCV PASSED iken SAV ROOT_CAUSE kalır, whitelist-dışı XCV-top
+  key'leri konservatif ROOT_CAUSE olarak korunur, selectRootCause
+  fallback davranışı doğrulanır. Ek model contract testleri:
+  [`SignatureInfoRootCauseTest`](src/test/java/io/mersel/dss/verify/api/models/SignatureInfoRootCauseTest.java) —
+  setter/getter round-trip, NON_NULL JSON kontratı,
+  `failedConstraints` opt-in alanının default null olması.
+
+- **Opt-in kategorize `failedConstraints` listesi — `?includeFailedConstraints=true`
+  query parameter ile audit detay** — Endpoint'lere yeni opsiyonel
+  query parametresi (`includeFailedConstraints`, default `false`).
+  `true` ise her imzaya yeni alan
+  [`SignatureInfo.failedConstraints: List<FailedConstraint>`](src/main/java/io/mersel/dss/verify/api/models/SignatureInfo.java)
+  (ve simetrik
+  [`TimestampInfo.failedConstraints`](src/main/java/io/mersel/dss/verify/api/models/TimestampInfo.java))
+  doldurulur — DSS pipeline'ının ürettiği <em>tüm</em> BBB FAIL
+  constraint'leri, her biri yeni
+  [`FailureCategory`](src/main/java/io/mersel/dss/verify/api/models/FailureCategory.java)
+  enum'u ile etiketlenmiş halde:
+  - **`ROOT_CAUSE`** — pipeline'ın gerçek başarısızlık sebepleri
+    (SubXCV içindeki spesifik check'ler, FC/ISC/VCI/PSV bağımsız
+    failure'lar, XCV-top'un whitelist dışı key'leri).
+  - **`DERIVED`** — XCV-top summary roll-up satırları
+    (`BBB_XCV_SUB`, `BBB_XCV_ICTIVRSC`) — SubXCV'lerden biri zaten
+    NOT_OK olduğu için tetiklenmiş yansıma.
+  - **`CASCADE`** — SAV/CV bloklarındaki downstream yan ürün satırları
+    (XCV INDETERMINATE/FAILED olduğunda sertifika context'i
+    kullanılamadığı için).
+
+  **Niçin opt-in?** Default `rootCause` operatöre yeterlidir — tek
+  aksiyon alabileceği somut neden. Kategorize liste yalnız audit,
+  forensic, "neden bu satır seçildi?" sorusu veya frontend'de gelişmiş
+  bir detay paneli için anlamlı; her zaman dönmek istemci kontratını
+  şişirir. JSON enum kontratı: enum sabit adı UPPER_CASE
+  (`"category": "ROOT_CAUSE"`) — diğer API enum'larıyla
+  (`SignatureType`, `SignaturePackaging`, `ChainRevocationStatus`,
+  `VerificationLevel`, `SuppressionCode`, `RejectionCode`) aynı
+  convention; istemci SDK'lar tek code-path ile çözer.
+
+  ```json
+  {
+    "rootCause": {
+      "key": "BBB_XCV_ISCGKU",
+      "message": "İmzacı sertifikası, beklenen anahtar kullanım alanına (KeyUsage) sahip değil! — Anahtar kullanımı : [KEY_ENCIPHERMENT, KEY_AGREEMENT]"
+    },
+    "failedConstraints": [
+      {
+        "key": "BBB_XCV_ISCGKU",
+        "message": "İmzacı sertifikası, beklenen anahtar kullanım alanına ...",
+        "category": "ROOT_CAUSE"
+      },
+      {
+        "key": "BBB_XCV_SUB",
+        "message": "SubXCV sonucu geçerli mi?",
+        "category": "DERIVED"
+      },
+      {
+        "key": "BBB_SAV_ISQPMDOSPP",
+        "message": "İmzalı qualifying property mevcut mu?",
+        "category": "CASCADE"
+      }
+    ]
+  }
+  ```
+
+  Tüm doğrulama endpoint'leri parametreyi destekler: birleşik
+  `/api/v1/verify/signature` ve geriye uyumluluk için `/xades`,
+  `/pades`, `/cades`. Default davranış değişmez (alan `null` kalır,
+  NON_NULL ile JSON'a yazılmaz, response şişmez); yalnız flag
+  verildiğinde liste eklenir.
+
+  **Boş liste sözleşmesi:** Opt-in açıkken alan deterministik olarak
+  set edilir — imzada FAIL constraint yoksa bile boş array (`[]`)
+  döner. Frontend "opt-in onayını" alanın varlığından okur; null vs
+  `[]` ayrımı tutarlı (`if (sig.failedConstraints) { ... }`).
+
+  **Imza ↔ timestamp simetri:** Aynı kontrat
+  [`TimestampInfo`](src/main/java/io/mersel/dss/verify/api/models/TimestampInfo.java)
+  için de geçerli — DSS DetailedReport'taki timestamp BBB bloğu (BBB
+  Id = `TimestampWrapper.getId()`) gezilerek `rootCause` doldurulur,
+  opt-in açıkken `failedConstraints` listesi de yazılır. Aynı
+  sınıflandırma kuralları (XCV roll-up DERIVED, SAV/CV cascade
+  CASCADE) timestamp tarafında da geçerli — TSA sertifika zinciri
+  KeyUsage uygunsuzluğu, NotExpired ihlali, revocation problemleri
+  imza tarafıyla birebir aynı yapıda raporlanır.
+
+  **JSON kontrat detayları:**
+  - `key` alanı DSS i18n bundle anahtarı (`BBB_XCV_ISCGKU`,
+    `TRUSTED_SERVICE_STATUS`, vb.) — locale değişse de aynı kalır;
+    audit ve frontend lookup table için stabil makine kontratıdır.
+  - `message` alanı configured locale (default `tr`) ile doldurulmuş
+    insan-okur metin; `additionalInfo` doluysa " — " ile birleştirilir.
+  - `category` alanı `rootCause` tek nesnesi için null kalır (her
+    zaman ROOT_CAUSE olduğu için kategori taşımaya gerek yok);
+    `failedConstraints` listesindeki her satır kendi kategorisini taşır.
+  - `@JsonInclude(NON_NULL)` ile null alanlar JSON'a yazılmaz; ayrıca
+    `application.properties`'e `spring.jackson.default-property-inclusion=non_null`
+    eklendi — yeni model eklenirken annotation unutulsa bile null
+    alanlar JSON'a sızmaz (kontrat istikrarı).
+
+  Üretim yolu:
+  [`AdvancedSignatureVerificationService#collectFailingBbbConstraintDetails`](src/main/java/io/mersel/dss/verify/api/services/verification/AdvancedSignatureVerificationService.java)
+  DetailedReport'taki tüm BBB bloklarını (FC, ISC, VCI, CV, SAV, XCV +
+  her SubXCV katmanı, PSV) gezer; `XmlStatus.NOT_OK` constraint'leri
+  `classifyFailure` ile etiketler; `selectRootCause` listeden tek bir
+  ROOT_CAUSE satırını seçer. Mevcut string-format helper
+  (`collectFailingBbbConstraintMessages`) artık bu yapısal helper'ı
+  sarmalayan ince bir adapter — geriye uyumluluk korunur, regresyon yok.
+
+  Kontrat testleri:
+  - [`UnifiedVerificationControllerIncludeFailedConstraintsTest`](src/test/java/io/mersel/dss/verify/api/controllers/UnifiedVerificationControllerIncludeFailedConstraintsTest.java)
+    — query parametresinin uçtan uca doğru aktığını, default kapalı
+    davranışı ve opt-in true durumunda her üç kategorinin JSON'a
+    düştüğünü doğrular.
+  - [`AdvancedSignatureVerificationServiceTimestampInfoTest`](src/test/java/io/mersel/dss/verify/api/services/verification/AdvancedSignatureVerificationServiceTimestampInfoTest.java)
+    — imza simetrisinde `TimestampInfo.rootCause` ve opt-in
+    `failedConstraints` alanlarının timestamp BBB bloğundan
+    doldurulduğunu kilitler (önceki versiyonda hayalet alandı,
+    asla doldurulmuyordu).
+  - [`AdvancedSignatureVerificationServiceEmptyListBehaviorTest`](src/test/java/io/mersel/dss/verify/api/services/verification/AdvancedSignatureVerificationServiceEmptyListBehaviorTest.java)
+    — opt-in açıkken boş liste de set edildiğini, kapalıyken alanın
+    NON_NULL ile gizlendiğini, ikisinin JSON'da ayırt edilebildiğini
+    doğrular.
+
 ### Changed
 - **Doğrulama exception'ları (bozuk XML, eksik namespace, parse hataları)
   artık Slack/webhook bildirimi tetikliyor** — Önceden `/api/v1/verify/xades`,

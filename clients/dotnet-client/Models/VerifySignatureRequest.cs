@@ -42,6 +42,38 @@ public sealed class VerifySignatureRequest
     public VerificationLevel Level { get; set; } = VerificationLevel.SIMPLE;
 
     /// <summary>
+    /// Her imza ve zaman damgası için tüm BBB FAIL constraint'leri
+    /// (<see cref="FailureCategory.ROOT_CAUSE"/> + <see cref="FailureCategory.DERIVED"/> +
+    /// <see cref="FailureCategory.CASCADE"/>) <see cref="SignatureInfo.FailedConstraints"/>
+    /// ve <see cref="TimestampInfo.FailedConstraints"/> alanlarına eklensin mi?
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Varsayılan: <c>false</c></b> — alan response'ta hiç görünmez; operatör
+    /// yalnız tek bir <see cref="SignatureInfo.RootCause"/> görür (frontend
+    /// dispatch için yeterli, kontrat dar). Bu kontratın varsayılan davranışı
+    /// %99 senaryoda doğrudur.
+    /// </para>
+    /// <para>
+    /// <b><c>true</c> verildiğinde</b>: her imza ve zaman damgasına kategorize
+    /// tam liste eklenir — audit/forensic akışları, "neden bu satır
+    /// <see cref="FailureCategory.ROOT_CAUSE"/> seçildi?" incelemesi veya
+    /// gelişmiş detay paneli için.
+    /// <see cref="SignatureInfo.RootCause"/> alanı zaten her zaman dolu olduğundan,
+    /// opt-in işlemi <em>ek</em> detay sağlar; mevcut response alanlarının
+    /// semantiğini değiştirmez.
+    /// </para>
+    /// <para>
+    /// Sunucu tarafında <c>?includeFailedConstraints=true</c> query parameter
+    /// (multipart için form field) olarak iletilir.
+    /// </para>
+    /// </remarks>
+    /// <seealso cref="SignatureInfo.FailedConstraints"/>
+    /// <seealso cref="TimestampInfo.FailedConstraints"/>
+    /// <seealso cref="FailureCategory"/>
+    public bool IncludeFailedConstraints { get; set; } = false;
+
+    /// <summary>
     /// İsteğe ek custom HTTP request header'ları. Sunucu tarafındaki
     /// <c>LogHeadersFilter</c> <c>x-log-*</c> prefix'li tüm header'ları
     /// otomatik olarak MDC'ye taşır; doğrulama log satırlarına bunları

@@ -56,6 +56,99 @@ public class SignatureInfo {
     private String signatureAlgorithm;
     private String digestAlgorithm;
     private List<String> validationErrors;
+
+    /**
+     * Bu imzanın DSS validation pipeline'ında <em>tek bir kök neden</em>
+     * (root cause) constraint'i — ETSI EN 319 102-1 spec dilinde
+     * <em>failed constraint</em>. {@link FailedConstraint#getKey() key}
+     * DSS sabit kodu (locale'den bağımsız);
+     * {@link FailedConstraint#getMessage() message} configured locale'de
+     * (default Türkçe) insan mesajı.
+     *
+     * <h3>Niçin tek nesne (liste değil)?</h3>
+     * <p>DSS validation pipeline'ı sıkı hiyerarşik akış izler — tek bir
+     * kök neden (örn. KeyUsage uygunsuz) <em>her zaman</em> birden fazla
+     * NOT_OK constraint üretir (XCV-top summary roll-up + SAV/CV cascade).
+     * Frontend bu satırları liste olarak alıp eşit ağırlıkta gösterirse
+     * operatör "üç ayrı sorun var" sanır; oysa yalnız bir tane gerçek
+     * kök neden vardır. Bu alan yalnız <em>tek</em> kök nedeni taşır;
+     * pipeline-side-effect satırları (roll-up + cascade) sessizce filtrelenir.</p>
+     *
+     * <p><b>Birden fazla gerçek kök neden varsa</b> (örn. iki ayrı
+     * sertifika için iki ayrı KeyUsage failure — counter signer + signer):
+     * DSS DetailedReport gezme sırasına göre <em>ilk</em> root cause
+     * seçilir (deterministik: FC → ISC → VCI → CV → SAV → XCV-top →
+     * SubXCV[0] → SubXCV[1] → ... → PSV). Operatör tüm root cause'ları
+     * ve roll-up/cascade satırlarını görmek istiyorsa
+     * {@code ?includeFailedConstraints=true} parametresi ile
+     * {@link #getFailedConstraints() failedConstraints} alanını
+     * isteyebilir (her satır kendi {@link FailureCategory category}
+     * bilgisini taşır).</p>
+     *
+     * <p><b>Defansif fallback</b>: Filter sonrası kök neden tespit
+     * edilemezse (DSS yeni sürümünde whitelist eksik), ham FAIL listesinden
+     * ilk satır seçilir; operatör hiçbir zaman bilgisiz kalmaz.</p>
+     *
+     * <p><b>{@link #validationErrors} ile farkı</b>: {@code validationErrors}
+     * üst-seviye DSS verdict özetini ({@code "İmza geçersiz: INDETERMINATE
+     * (CHAIN_CONSTRAINTS_FAILURE)"}) ve geriye dönük operatör mesajlarını
+     * tutmaya devam eder. {@code rootCause} ise gerçek kök nedenin yapısal
+     * (key + message) sunumudur; frontend bu kodu doğrudan dispatch
+     * ederek özel yönlendirme/UI yapabilir (regex ile parse etmek gerekmez).</p>
+     *
+     * <p>Tolerans uygulanmış imzalar için <code>null</code> döner —
+     * {@code MDSS-XADES-LEGACY-TR-TYPE-URI} gibi suppression akışları
+     * verdict'i VALID'e çevirdiğinde BBB FAIL'leri zaten konu dışıdır.
+     * {@code @JsonInclude(NON_NULL)} ile JSON çıktısında alan görünmez.</p>
+     *
+     * @see FailedConstraint
+     * @see #getFailedConstraints()
+     */
+    private FailedConstraint rootCause;
+
+    /**
+     * Bu imzanın DSS validation pipeline'ındaki <em>tüm</em> BBB FAIL
+     * constraint'leri, {@link FailureCategory kategorize edilmiş} halde —
+     * opt-in alan. Yalnız {@code ?includeFailedConstraints=true} query
+     * parameter'i ile istendiğinde doldurulur; default <code>null</code>
+     * kalır ({@code @JsonInclude(NON_NULL)} ile JSON'a yazılmaz, response
+     * şişmez).
+     *
+     * <h3>Niçin opt-in?</h3>
+     * <p>{@link #rootCause} default davranışta operatöre yeterlidir —
+     * tek aksiyon alabileceği somut neden. Liste sadece audit/forensic,
+     * "neden bu satır seçildi?" sorusu, veya frontend'de gelişmiş bir
+     * detay paneli için anlamlı; her zaman dönmek istemci kontratını
+     * gereksiz şişirir.</p>
+     *
+     * <h3>İçerik</h3>
+     * <p>Tüm BBB FAIL constraint'leri:</p>
+     * <ul>
+     *   <li>{@link FailureCategory#ROOT_CAUSE} — pipeline'ın gerçek
+     *       başarısızlık sebepleri (SubXCV içindeki spesifik check'ler,
+     *       FC/ISC/VCI/PSV bağımsız failure'lar, XCV-top'un whitelist
+     *       dışı key'leri).</li>
+     *   <li>{@link FailureCategory#DERIVED} — XCV-top summary roll-up
+     *       satırları ({@code BBB_XCV_SUB}, {@code BBB_XCV_ICTIVRSC}).</li>
+     *   <li>{@link FailureCategory#CASCADE} — SAV/CV bloklarındaki
+     *       downstream yan ürün satırları (XCV INDETERMINATE/FAILED
+     *       olduğunda).</li>
+     * </ul>
+     *
+     * <p>Sıra deterministik: BBB gezme sırası (FC → ISC → VCI → CV →
+     * SAV → XCV-top → SubXCV[0..n] → PSV). Aynı {@code (key, message)}
+     * çifti tekrar etmez.</p>
+     *
+     * <p>{@link #rootCause} alanı bu listenin {@code ROOT_CAUSE}
+     * kategorisindeki ilk satırıdır — frontend tek aksiyon mesajı için
+     * doğrudan {@code rootCause}'u kullanır; tüm detay için listeyi
+     * gezer.</p>
+     *
+     * @see FailureCategory
+     * @see FailedConstraint
+     */
+    private List<FailedConstraint> failedConstraints;
+
     private List<String> validationWarnings;
     private String indication; // TOTAL_PASSED, PASSED, FAILED, etc.
     private String subIndication; // Sub-indication if any
@@ -206,6 +299,22 @@ public class SignatureInfo {
 
     public List<String> getValidationErrors() {
         return validationErrors;
+    }
+
+    public FailedConstraint getRootCause() {
+        return rootCause;
+    }
+
+    public void setRootCause(FailedConstraint rootCause) {
+        this.rootCause = rootCause;
+    }
+
+    public List<FailedConstraint> getFailedConstraints() {
+        return failedConstraints;
+    }
+
+    public void setFailedConstraints(List<FailedConstraint> failedConstraints) {
+        this.failedConstraints = failedConstraints;
     }
 
     public void setValidationErrors(List<String> validationErrors) {

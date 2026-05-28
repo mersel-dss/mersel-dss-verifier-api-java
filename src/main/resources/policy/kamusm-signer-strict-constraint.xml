@@ -73,7 +73,16 @@
 			<Id>NO_POLICY</Id>
 		</AcceptablePolicies>
 		<PolicyAvailable Level="INFORM" />
-		<PolicyHashMatch Level="WARN" />
+		<!--
+		    PolicyHashMatch — İmza bir signature policy referansı taşıyorsa
+		    (XAdES SignaturePolicyIdentifier / CAdES PolicyId), o policy
+		    dokümanının hash'i imza zamanında ne idiyse o olmalı. WARN'a
+		    bırakmak "policy değiştirildi ama imza eski hash'le bağlı"
+		    durumunu sessize alır — eIDAS-QES non-repudiation iddiası bu
+		    kontrol ile ayakta durur. FAIL, KamuSM/GİB politikalarıyla
+		    uyumludur (resmi policy dokümanı sabit hash ile yayınlanır).
+		-->
+		<PolicyHashMatch Level="FAIL" />
 		<AcceptableFormats Level="FAIL">
 			<Id>*</Id>
 		</AcceptableFormats>
@@ -116,9 +125,38 @@
 				<RevocationDataAvailable Level="FAIL" />
 				<AcceptableRevocationDataFound Level="FAIL" />
 				<CRLNextUpdatePresent Level="WARN" />
-				<RevocationFreshness Level="IGNORE" Unit="DAYS" Value="0" />
-				<KeyUsage Level="WARN">
+				<!--
+				    İMZACI revocation FRESHNESS — KamuSM OCSP real-time
+				    (saniyeler içinde güncel), CRL 7 günlük periyot. 24
+				    saatten eski revocation verisi "stale" sayılır: iptal
+				    edilmiş bir sertifika için sessizce kabul anlamına gelir.
+				    eIDAS-QES paralel davranışı: FAIL 24h. Operasyon
+				    pencereleri (örn. CRL bakım kesintisi) için bu kontrol
+				    nadiren ihlal olur; ihlal olduğunda da "manuel inceleme
+				    gerekir" demek "iptal kaçırdı" demekten iyidir.
+				-->
+				<RevocationFreshness Level="FAIL" Unit="HOURS" Value="24" />
+				<!--
+				    KeyUsage — İMZACI sertifikası dijital imza üretimine yetkili
+				    olmalı. KamuSM Mali Mühür / NES sertifikalarında qualified
+				    signature için ETSI EN 319 411-1 nonRepudiation (a.k.a.
+				    contentCommitment) bit'ini zorunlu kılar; pratikte
+				    digitalSignature ile düzenlenmiş varyantlar da mevcut.
+				    DSS bu listeyi OR olarak değerlendirir: ikisinden EN AZ
+				    BİRİ varsa OK, hiçbiri yoksa FAIL.
+
+				    NEDEN FAIL? Şifreleme amaçlı düzenlenmiş Mali Mühür
+				    sertifikaları (KeyUsage = keyEncipherment + keyAgreement,
+				    EKU = TLS Web Client Authentication) bazı üreticilerce
+				    yanlışlıkla XML imzalamada kullanılıyor. Eski WARN
+				    konfigürasyonu bu vakayı yalnızca uyarıya düşürüyor ve
+				    DSS'in pipeline'ı imzayı VALID gösterebiliyordu;
+				    TÜBİTAK doğrulayıcısı ise QC kuralı gereği FAIL veriyor.
+				    FAIL seviyesi iki doğrulayıcıyı paralel hâle getirir.
+				-->
+				<KeyUsage Level="FAIL">
 					<Id>nonRepudiation</Id>
+					<Id>digitalSignature</Id>
 				</KeyUsage>
 				<PolicyTree Level="WARN" />
 				<NameConstraints Level="WARN" />
@@ -232,9 +270,17 @@
 				<RevocationDataAvailable Level="FAIL" />
 				<AcceptableRevocationDataFound Level="FAIL" />
 				<CRLNextUpdatePresent Level="WARN" />
-				<RevocationFreshness Level="IGNORE" Unit="DAYS" Value="0" />
-				<KeyUsage Level="WARN">
+				<!-- Sayaç imzanın iptal kontrolü ana imzayla aynı sıkılıkta, FAIL 24h -->
+				<RevocationFreshness Level="FAIL" Unit="HOURS" Value="24" />
+				<!--
+				    KeyUsage — SAYAÇ İMZASI sertifikası ana imzacıyla aynı QC
+				    kurallarına tabidir; bkz. SignatureConstraints altındaki
+				    KeyUsage yorumu. nonRepudiation VEYA digitalSignature
+				    varsa OK, ikisi de yoksa FAIL.
+				-->
+				<KeyUsage Level="FAIL">
 					<Id>nonRepudiation</Id>
+					<Id>digitalSignature</Id>
 				</KeyUsage>
 				<PolicyTree Level="WARN" />
 				<NameConstraints Level="WARN" />
@@ -348,7 +394,14 @@
 				<RevocationDataAvailable Level="WARN" />
 				<AcceptableRevocationDataFound Level="WARN" />
 				<CRLNextUpdatePresent Level="WARN" />
-				<RevocationFreshness Level="IGNORE" Unit="DAYS" Value="0" />
+				<!--
+				    TSA revocation FRESHNESS — TSA sertifikalarının CRL'leri
+				    çok daha nadir güncellenir (bazıları haftalık), iptal
+				    olayları neredeyse hiç yaşanmaz. WARN 7 gün operasyonel
+				    pencerede tipik TSA CRL ritmi ile uyumlu, anlamlı bir
+				    bayat veri uyarısı için yeterli ufuk.
+				-->
+				<RevocationFreshness Level="WARN" Unit="HOURS" Value="168" />
 				<ExtendedKeyUsage Level="FAIL">
 					<Id>timeStamping</Id>
 				</ExtendedKeyUsage>
@@ -528,16 +581,30 @@
 			<Algo>ECDSA</Algo>
 			<Algo>PLAIN-ECDSA</Algo>
 		</AcceptableEncryptionAlgo>
+		<!--
+		    MiniPublicKeySize — anahtar boyutu minimumları.
+		    RSA / RSASSA-PSS: 2048 bit (KamuSM Mali Mühür default'u; NIST
+		    SP 800-57 ≥ 2030 yönelimi 3072 bit ama 2048 hâlâ kabul edilen
+		    minimum). 786/1024/1536-bit anahtarlar 2010-2019 arası "exp"
+		    edildi; AcceptableDigestAlgo'dan da olmadığı için tamamen
+		    devre dışı.
+		    DSA: 2048 bit. ECDSA / PLAIN-ECDSA: 256 bit (P-256+, ETSI SOG-IS).
+		-->
 		<MiniPublicKeySize>
-			<Algo Size="1024">DSA</Algo>
-			<Algo Size="786">RSA</Algo>
-			<Algo Size="786">RSASSA-PSS</Algo>
-			<Algo Size="160">ECDSA</Algo>
-			<Algo Size="160">PLAIN-ECDSA</Algo>
+			<Algo Size="2048">DSA</Algo>
+			<Algo Size="2048">RSA</Algo>
+			<Algo Size="2048">RSASSA-PSS</Algo>
+			<Algo Size="256">ECDSA</Algo>
+			<Algo Size="256">PLAIN-ECDSA</Algo>
 		</MiniPublicKeySize>
+		<!--
+		    AcceptableDigestAlgo — MD5 ve SHA1 prod kabul listesinden
+		    çıkarıldı (2026+ defansif tutum). AlgoExpirationDate altındaki
+		    legacy entries tarihsel doğrulama context'i için korunur;
+		    pratikte bu listede olmadıkları için DSS CRYPTOGRAPHIC_NOT_OK
+		    ile reddeder.
+		-->
 		<AcceptableDigestAlgo>
-			<Algo>MD5</Algo>
-			<Algo>SHA1</Algo>
 			<Algo>SHA224</Algo>
 			<Algo>SHA256</Algo>
 			<Algo>SHA384</Algo>

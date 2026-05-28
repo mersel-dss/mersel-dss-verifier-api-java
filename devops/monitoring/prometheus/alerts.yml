@@ -78,3 +78,60 @@ groups:
         annotations:
           summary: "High verification failure rate"
           description: "Verification failure rate is {{ $value | humanizePercentage }}"
+
+      # =====================================================================
+      # MDSS Tolerance Gate (KamuSM/GİB XAdES legacy Type URI) — gate v2
+      # =====================================================================
+
+      # MDSS Tolerance — kullanim spike'i. Tolerance her zaman edge-case
+      # senaryolar icin kurgulandi (yanlis-yazilmis Type URI). Sustained
+      # >1 req/s rate, ya yeni bir uretici toplu hatali imza gonderiyor
+      # demek (cap analizi gerekir) ya da bir saldirgan exploit'i deniyor
+      # (manuel forensic gerek). Operator gozetimi tetiklenir.
+      - alert: MdssToleranceUsageSpike
+        expr: sum(rate(mdss_tolerance_applied_total[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+          service: verify-api
+          subsystem: tolerance-gate
+        annotations:
+          summary: "MDSS tolerance gate kullanım spike'ı (>1 req/s)"
+          description: |
+            Son 5 dakikada {{ $value }} req/s tolerance uygulamasi gozlendi.
+            Tolerance edge-case icin kurgulandi; sustained yuksek rate iki
+            ihtimal: (a) yeni bir uretici toplu hatali imza gonderiyor —
+            forensic incele, kaynak file_name + sha256 pattern'i ara,
+            ureticiyi uyar; (b) saldirgan tolerance'i exploit etmeyi
+            deniyor — log'larda rejected_total'i da takip et.
+            Sorgu: `sum by (gate_version, code) (rate(mdss_tolerance_applied_total[5m]))`
+
+      # NOT: v2.0/v2.1'de buraya iki alert daha eklenmisti:
+      #   MdssToleranceReValidationErrorRate
+      #   MdssToleranceReValidationLatencyHigh
+      # Gate v2.2'de cryptographic re-validation katmani tasarim hatasi
+      # nedeniyle kaldirildi (Type URI imza kapsaminda, byte stream'inde
+      # degistirmek SignatureValue'yi bozar). Bu yuzden iki alert da
+      # silindi. Karsilik gelen metric'ler de artik exposed degil:
+      #   - mdss_tolerance_applied_total{re_validation=...}  (label removed)
+      #   - mdss_tolerance_revalidation_seconds              (metric removed)
+
+      # MDSS Tolerance — yuksek rejection orani (gate'i hic gecmeyen
+      # aday vakalar). Edge-case'in genel rate ile uyumlu olmasi normal;
+      # rejected_total artarsa yeni saldiri pattern'i veya yanlis-
+      # konfigure edilmis legacy uretici sinyali olabilir.
+      - alert: MdssToleranceRejectionRateHigh
+        expr: sum(rate(mdss_tolerance_rejected_total[5m])) > 5
+        for: 10m
+        labels:
+          severity: info
+          service: verify-api
+          subsystem: tolerance-gate
+        annotations:
+          summary: "MDSS tolerance rejection rate yüksek (>5 req/s)"
+          description: |
+            Tolerance gate son 5 dakikada {{ $value }} req/s vakayi
+            REDDETTI. Rejection nedenlerini incelemek icin:
+            `sum by (reason) (rate(mdss_tolerance_rejected_total[10m]))`.
+            'unallowed_failure_key' yuksekse legacy uretici yeni bir
+            patoloji uretiyor olabilir.

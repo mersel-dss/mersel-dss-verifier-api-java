@@ -1,5 +1,7 @@
 package io.mersel.dss.verify.api.config;
 
+import java.util.Locale;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Configuration;
 
@@ -169,24 +171,44 @@ public class VerificationConfiguration {
      * imzaları geçerli kabul ediyor — kriptografik olarak imza ZATEN sağlam,
      * yalnızca <code>Type</code> attribute'unda yazım hatası var.</p>
      *
-     * <p><b>Aktifken davranış</b>: Doğrulama sonrası inceleme sırasında
-     * şu tüm koşullar aranır:</p>
+     * <p><b>Aktifken davranış (gate v2 — universal allow-list)</b>:
+     * Doğrulama sonrası inceleme sırasında şu <em>sekiz</em> koşul aranır;
+     * herhangi biri eksik ise imza yine geçersiz raporlanır.</p>
      * <ol>
      *   <li>Indication = INDETERMINATE</li>
-     *   <li>SubIndication = SIG_CONSTRAINTS_FAILURE</li>
+     *   <li>SubIndication explicit allow-set'te
+     *       ({@code SIG_CONSTRAINTS_FAILURE} — diğerleri asla)</li>
      *   <li>DSS DiagnosticData'da
-     *       <code>signatureWrapper.isSignatureIntact() == true</code> ve
-     *       <code>isSignatureValid() == true</code></li>
-     *   <li>BBB SAV'da yalnızca <code>BBB_SAV_ISQPMDOSPP</code> hatası var
-     *       (başka SAV constraint'i FAIL etmemiş)</li>
-     *   <li>Orijinal XML byte'larında SignedProperties referansının
-     *       <code>Type</code> attribute'u <code>01903</code> + ".xsd" + "#SignedProperties"
-     *       paterniyle eşleşiyor (yani <em>spesifik</em> üretici hatası)</li>
+     *       <code>signatureWrapper.isSignatureIntact() == true</code>
+     *       (kriptografik imza sağlam)</li>
+     *   <li>DSS DiagnosticData'da
+     *       <code>signatureWrapper.isSignatureValid() == true</code>
+     *       (referans digest'leri eşleşiyor)</li>
+     *   <li><b>Universal allow-list</b>: Tüm BBB bloklarında
+     *       (FC/ISC/VCI/CV/SAV/XCV-top/SubXCV/PSV) gözlenen NOT_OK
+     *       constraint key set'i {@code {BBB_SAV_ISQPMDOSPP}}'nin
+     *       alt-kümesi olmalı (başka bir blokta tek bir FAIL bile
+     *       gate'i kapatır; XCV/CV/FC/PSV vb. hiçbir gerçek hata
+     *       affedilmez)</li>
+     *   <li>Detector orijinal XML byte'larında Type URI patern eşleşmesi
+     *       yakalıyor (P1 = <code>…XAdES.xsd…#SignedProperties</code>
+     *       veya P2 = <code>v1.3.2/v1.4.1#SignedProperties</code>)</li>
+     *   <li>Forensic audit — kararın gerekçesi
+     *       {@link io.mersel.dss.verify.api.models.AppliedSuppression}
+     *       altında: gate version, izinli/gözlenen FAIL key'leri,
+     *       document SHA-256</li>
      * </ol>
      *
-     * <p>Bu koşulların TÜMÜ sağlanmazsa imza yine geçersiz raporlanır.
-     * Yani <i>jenerik</i> bir SIG_CONSTRAINTS_FAILURE toleransı değildir;
-     * sadece bu spesifik Type URI yazım hatasını affeder.</p>
+     * <p><em>Tarihsel not — re-validation katmanı:</em> v2.0/v2.1
+     * sürümlerinde bu gate'in son adımı olarak bir "cryptographic
+     * re-validation" katmanı vardı (Type URI normalize edilip XML DSS'e
+     * yeniden veriliyordu). Tasarım hatasıydı çünkü Type URI
+     * <code>&lt;ds:Reference&gt;</code> attribute olarak SignedInfo
+     * bloğunda yer alır ve imza kapsamındadır; byte stream'inde
+     * değiştirmek SignatureValue'yi geçersizleştirir ve re-validation
+     * gerçek P1/P2 vakalarda her zaman <code>SIG_CRYPTO_FAILURE</code>
+     * dönerdi. v2.2'de katman tamamen kaldırıldı; gate
+     * "allow-list-only" mantığa düştü (yukarıdaki süzgeçler).</p>
      *
      * <p>Default <b>açık</b>: Mersel DSS Verifier zaten Türkiye ekosistemine
      * özgü bir doğrulayıcı. Operatör eIDAS-QES paralelinde davranmak isterse
@@ -232,6 +254,46 @@ public class VerificationConfiguration {
      */
     @Value("${verification.aia.cache.ttl-seconds:86400}")
     private long aiaCacheTtlSeconds;
+
+    /**
+     * <b>DSS i18n locale — doğrulama mesajlarının dili.</b>
+     *
+     * <p>DSS validation pipeline'ı tüm BBB constraint mesajlarını
+     * (<code>BBB_XCV_ISCGKU</code>, <code>TRUSTED_SERVICE_STATUS</code> vb.)
+     * <code>I18nProvider</code> üzerinden bu locale ile doldurur:</p>
+     * <ul>
+     *   <li>Bundle adı: <code>dss-messages</code> (DSS jar içinden gelir)</li>
+     *   <li>Standart Java {@link java.util.ResourceBundle} fallback chain:
+     *       <code>dss-messages_tr_TR.properties</code> →
+     *       <code>dss-messages_tr.properties</code> →
+     *       <code>dss-messages.properties</code> (DSS jar default — İngilizce)</li>
+     *   <li>Türkiye bölgemizdeki üreticilerin operatörleri için default
+     *       <code>tr</code>. Eksik anahtarlar otomatik olarak DSS'in
+     *       İngilizce default mesajlarına fallback eder — boş çıktı oluşmaz.</li>
+     *   <li>Override örnekleri: <code>en</code>, <code>en-US</code>,
+     *       <code>fr</code>, <code>de</code>, ya da BCP-47 format
+     *       (<code>tr-TR</code>). Tag {@link Locale#forLanguageTag} ile
+     *       parse edilir; geçersiz/anlaşılmaz değer verildiğinde startup
+     *       WARN log'u düşer ve <code>tr</code> default'una geri dönülür
+     *       — sessiz İngilizce'ye düşmek operatörü yanıltabilir.</li>
+     * </ul>
+     *
+     * <p>Override yöntemleri:</p>
+     * <ol>
+     *   <li><code>application.properties</code>:
+     *       <code>verification.i18n-locale=en</code></li>
+     *   <li>Environment variable: <code>VERIFICATION_I18N_LOCALE=en</code></li>
+     * </ol>
+     *
+     * <p><b>TR çeviri ekleme</b>: <code>src/main/resources/dss-messages_tr.properties</code>
+     * dosyasına Java <code>ResourceBundle</code> formatında satır ekleyin
+     * (örn. <code>BBB_XCV_ISCGKU=Sertifikanın anahtar kullanım alanı (KeyUsage)
+     * imza için yetkili mi?</code>). DSS jar default'undaki tüm anahtarlar
+     * <code>dss-messages.properties</code> içinde listelenir; eksik
+     * bıraktığınız anahtarlar otomatik İngilizce gelmeye devam eder.</p>
+     */
+    @Value("${verification.i18n-locale:tr}")
+    private String i18nLocale;
 
     public String getCertStorePath() {
         return certStorePath;
@@ -387,6 +449,62 @@ public class VerificationConfiguration {
 
     public void setAiaCacheTtlSeconds(long aiaCacheTtlSeconds) {
         this.aiaCacheTtlSeconds = aiaCacheTtlSeconds;
+    }
+
+    public String getI18nLocale() {
+        return i18nLocale;
+    }
+
+    public void setI18nLocale(String i18nLocale) {
+        this.i18nLocale = i18nLocale;
+    }
+
+    /**
+     * Default locale tag — config tag boş veya geçersizse buna düşülür.
+     * Türkçe ekosistem için <code>tr</code>; eksik mesaj olduğunda DSS
+     * jar'ı zaten İngilizce default'a fallback eder, dolayısıyla bu değer
+     * yalnızca primary lookup hedefini belirler.
+     */
+    public static final String DEFAULT_I18N_LOCALE_TAG = "tr";
+
+    /**
+     * Konfigüre edilen locale tag'ini ({@link Locale#forLanguageTag} ile)
+     * parse eder; boş veya geçersiz tag durumunda {@link #DEFAULT_I18N_LOCALE_TAG}
+     * Türkçe locale'ine düşer.
+     *
+     * <p><b>Tasarım kararı</b>: <code>Locale.ROOT</code> (i18n'i devre
+     * dışı bırakır, anahtarın kendisini döner) veya silent İngilizce
+     * fallback YERİNE Türkçe'ye düşülür — bu doğrulayıcı zaten Türkiye
+     * ekosistemine adanmış; operatör yanlış config verdiğinde hâlâ
+     * okunaklı bir output görmesi gerekir.</p>
+     *
+     * <p>Geçersiz tag durumu: {@link Locale#forLanguageTag} boş bir
+     * Locale (language=&quot;&quot;) döndürürse — örn. operatör
+     * <code>verification.i18n-locale=invalid_xx</code> verirse — bu
+     * metoda yan etki olarak WARN log'u düşmez (saf parsing helper);
+     * startup-time uyarı için bkz.
+     * {@code I18nProviderConfiguration#warnOnInvalidLocale}.</p>
+     */
+    public Locale getI18nLocaleObject() {
+        return parseLocaleOrDefault(i18nLocale);
+    }
+
+    /**
+     * Locale tag → Locale objesi. Pakekt-private; testlerin parsing
+     * davranışını doğrudan asserte edebilmesi için (`Locale#forLanguageTag`
+     * sessiz fallback yapar; biz onu `language.isEmpty()` ile yakalarız).
+     */
+    static Locale parseLocaleOrDefault(String tag) {
+        if (tag == null || tag.trim().isEmpty()) {
+            return Locale.forLanguageTag(DEFAULT_I18N_LOCALE_TAG);
+        }
+        Locale parsed = Locale.forLanguageTag(tag.trim());
+        if (parsed.getLanguage().isEmpty()) {
+            // forLanguageTag IETF-uyumlu olmayan girdilerde Locale("","") döner.
+            // Bu durumda default Türkçe'ye düş.
+            return Locale.forLanguageTag(DEFAULT_I18N_LOCALE_TAG);
+        }
+        return parsed;
     }
 }
 

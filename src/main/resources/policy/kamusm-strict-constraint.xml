@@ -66,7 +66,13 @@
 			<Id>NO_POLICY</Id>
 		</AcceptablePolicies>
 		<PolicyAvailable Level="INFORM" />
-		<PolicyHashMatch Level="WARN" />
+		<!--
+		    PolicyHashMatch — İmza bir signature policy referansı taşıyorsa
+		    o policy dokümanının hash'i imza zamanında ne idiyse o olmalı.
+		    eIDAS-QES non-repudiation iddiası bu kontrol ile ayakta durur;
+		    strict profilde tabii ki FAIL.
+		-->
+		<PolicyHashMatch Level="FAIL" />
 		<AcceptableFormats Level="FAIL">
 			<Id>*</Id>
 		</AcceptableFormats>
@@ -108,9 +114,32 @@
 				<RevocationDataAvailable Level="FAIL" />
 				<AcceptableRevocationDataFound Level="FAIL" />
 				<CRLNextUpdatePresent Level="WARN" />
-				<RevocationFreshness Level="IGNORE" Unit="DAYS" Value="0" />
-				<KeyUsage Level="WARN">
+				<!--
+				    İMZACI revocation FRESHNESS — strict profil 24 saatten
+				    eski revocation verisi kabul etmez. eIDAS-QES paralel
+				    davranışı.
+				-->
+				<RevocationFreshness Level="FAIL" Unit="HOURS" Value="24" />
+				<!--
+				    KeyUsage — İMZACI sertifikası dijital imza üretimine yetkili
+				    olmalı. KamuSM Mali Mühür / NES sertifikalarında qualified
+				    signature için ETSI EN 319 411-1 nonRepudiation (a.k.a.
+				    contentCommitment) bit'ini zorunlu kılar; pratikte
+				    digitalSignature ile düzenlenmiş varyantlar da mevcut.
+				    DSS bu listeyi OR olarak değerlendirir: ikisinden EN AZ
+				    BİRİ varsa OK, hiçbiri yoksa FAIL.
+
+				    NEDEN FAIL? Şifreleme amaçlı düzenlenmiş Mali Mühür
+				    sertifikaları (KeyUsage = keyEncipherment + keyAgreement,
+				    EKU = TLS Web Client Authentication) bazı üreticilerce
+				    yanlışlıkla XML imzalamada kullanılıyor; TÜBİTAK
+				    doğrulayıcısı QC kuralı gereği FAIL veriyor. Bu
+				    profilde her zaten tüm katmanlar FAIL — KeyUsage da
+				    aynı sıkılıkta.
+				-->
+				<KeyUsage Level="FAIL">
 					<Id>nonRepudiation</Id>
+					<Id>digitalSignature</Id>
 				</KeyUsage>
 				<PolicyTree Level="WARN" />
 				<NameConstraints Level="WARN" />
@@ -221,9 +250,17 @@
 				<RevocationDataAvailable Level="FAIL" />
 				<AcceptableRevocationDataFound Level="FAIL" />
 				<CRLNextUpdatePresent Level="WARN" />
-				<RevocationFreshness Level="IGNORE" Unit="DAYS" Value="0" />
-				<KeyUsage Level="WARN">
+				<!-- Sayaç imza için aynı sıkılıkta: 24h max stale revocation. -->
+				<RevocationFreshness Level="FAIL" Unit="HOURS" Value="24" />
+				<!--
+				    KeyUsage — SAYAÇ İMZASI sertifikası ana imzacıyla aynı QC
+				    kurallarına tabidir; bkz. SignatureConstraints altındaki
+				    KeyUsage yorumu. nonRepudiation VEYA digitalSignature
+				    varsa OK, ikisi de yoksa FAIL.
+				-->
+				<KeyUsage Level="FAIL">
 					<Id>nonRepudiation</Id>
+					<Id>digitalSignature</Id>
 				</KeyUsage>
 				<PolicyTree Level="WARN" />
 				<NameConstraints Level="WARN" />
@@ -336,7 +373,13 @@
 				<RevocationDataAvailable Level="FAIL" />
 				<AcceptableRevocationDataFound Level="FAIL" />
 				<CRLNextUpdatePresent Level="WARN" />
-				<RevocationFreshness Level="IGNORE" Unit="DAYS" Value="0" />
+				<!--
+				    TSA revocation FRESHNESS — TSA CRL'leri haftalık ritimle
+				    yenilenir; iptal olayları nadirdir. Strict profilde de
+				    WARN 7 gün pragmatik üst sınırdır; FAIL'e çekmek
+				    operasyonel pencerede yanlış pozitiflere yol açabilir.
+				-->
+				<RevocationFreshness Level="WARN" Unit="HOURS" Value="168" />
 				<ExtendedKeyUsage Level="FAIL">
 					<Id>timeStamping</Id>
 				</ExtendedKeyUsage>
@@ -516,16 +559,25 @@
 			<Algo>ECDSA</Algo>
 			<Algo>PLAIN-ECDSA</Algo>
 		</AcceptableEncryptionAlgo>
+		<!--
+		    MiniPublicKeySize — eIDAS-QES asgari anahtar boyutları.
+		    RSA / RSASSA-PSS: 2048 (KamuSM default'u; NIST 2030 yönelimi
+		    3072 ama 2048 hâlâ kabul edilen minimum). DSA: 2048.
+		    ECDSA / PLAIN-ECDSA: 256 (ETSI SOG-IS).
+		-->
 		<MiniPublicKeySize>
-			<Algo Size="1024">DSA</Algo>
-			<Algo Size="786">RSA</Algo>
-			<Algo Size="786">RSASSA-PSS</Algo>
-			<Algo Size="160">ECDSA</Algo>
-			<Algo Size="160">PLAIN-ECDSA</Algo>
+			<Algo Size="2048">DSA</Algo>
+			<Algo Size="2048">RSA</Algo>
+			<Algo Size="2048">RSASSA-PSS</Algo>
+			<Algo Size="256">ECDSA</Algo>
+			<Algo Size="256">PLAIN-ECDSA</Algo>
 		</MiniPublicKeySize>
+		<!--
+		    AcceptableDigestAlgo — MD5 ve SHA1 prod kabul listesinden
+		    çıkarıldı. AlgoExpirationDate altındaki entries tarihsel
+		    forensic için korunur.
+		-->
 		<AcceptableDigestAlgo>
-			<Algo>MD5</Algo>
-			<Algo>SHA1</Algo>
 			<Algo>SHA224</Algo>
 			<Algo>SHA256</Algo>
 			<Algo>SHA384</Algo>

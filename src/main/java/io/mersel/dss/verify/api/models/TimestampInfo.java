@@ -20,6 +20,37 @@ public class TimestampInfo {
     private String tsaName;
     private List<String> validationErrors;
 
+    /**
+     * Bu zaman damgasının DSS validation pipeline'ında <em>tek bir kök neden</em>
+     * (root cause) constraint'i. Bkz. {@link SignatureInfo#getRootCause()}
+     * dokümantasyonu — aynı sözleşmeyi taşır: pipeline-side-effect satırları
+     * (XCV-top roll-up + SAV/CV cascade) sessizce filtrelenir, yalnız gerçek
+     * kök neden döner. Birden fazla kök neden varsa DSS gezme sırasına göre
+     * ilki seçilir; defansif fallback ile hiç kök neden tespit edilemezse
+     * ham FAIL listesinden ilk satır seçilir. {@code null} → bu zaman
+     * damgasında FAIL constraint yok (geçerli).
+     *
+     * <p>Eksiksiz audit için (tüm root cause'lar + roll-up/cascade satırları)
+     * {@link #getFailedConstraints() failedConstraints} alanı opt-in olarak
+     * doldurulabilir.</p>
+     */
+    private FailedConstraint rootCause;
+
+    /**
+     * Bu zaman damgasının DSS validation pipeline'ındaki <em>tüm</em> BBB
+     * FAIL constraint'leri, {@link FailureCategory kategorize edilmiş} halde —
+     * opt-in alan. Yalnız {@code ?includeFailedConstraints=true} query
+     * parameter'i ile istendiğinde doldurulur; default <code>null</code>
+     * kalır ({@code @JsonInclude(NON_NULL)} ile JSON'a yazılmaz).
+     *
+     * <p>Bkz. {@link SignatureInfo#getFailedConstraints()} dokümantasyonu —
+     * aynı sözleşme: {@link FailureCategory#ROOT_CAUSE} (pipeline'ın
+     * gerçek başarısızlık sebepleri), {@link FailureCategory#DERIVED}
+     * (XCV-top summary roll-up), {@link FailureCategory#CASCADE}
+     * (SAV/CV downstream yan ürün).</p>
+     */
+    private List<FailedConstraint> failedConstraints;
+
     // Getters and Setters
     public boolean isValid() {
         return valid;
@@ -91,6 +122,22 @@ public class TimestampInfo {
 
     public void setValidationErrors(List<String> validationErrors) {
         this.validationErrors = validationErrors;
+    }
+
+    public FailedConstraint getRootCause() {
+        return rootCause;
+    }
+
+    public void setRootCause(FailedConstraint rootCause) {
+        this.rootCause = rootCause;
+    }
+
+    public List<FailedConstraint> getFailedConstraints() {
+        return failedConstraints;
+    }
+
+    public void setFailedConstraints(List<FailedConstraint> failedConstraints) {
+        this.failedConstraints = failedConstraints;
     }
 }
 

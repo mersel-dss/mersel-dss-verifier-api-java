@@ -25,6 +25,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * İmza doğrulama servisi - PAdES, XAdES ve diğer formatlar için
@@ -62,6 +63,18 @@ public class SignatureVerificationService {
     private InvalidSignatureNotifier invalidSignatureNotifier;
 
     /**
+     * DSS validation pipeline locale'i — bkz.
+     * {@link io.mersel.dss.verify.api.config.I18nProviderConfiguration#dssValidationLocale()}.
+     * Default <code>tr</code>; tüm BBB constraint mesajlarının dilini
+     * belirler. {@link AdvancedSignatureVerificationService} ile aynı
+     * locale paylaşılır — operatör tek bir property
+     * (<code>verification.i18n-locale</code>) ile her iki servisi de
+     * yönetebilir.
+     */
+    @Autowired
+    private Locale dssValidationLocale;
+
+    /**
      * İmzalı dokümanı doğrular
      */
     public VerificationResult verifySignature(
@@ -96,6 +109,10 @@ public class SignatureVerificationService {
             // Validator oluştur
             SignedDocumentValidator validator = SignedDocumentValidator.fromDocument(document);
 
+            // DSS i18n locale (default tr) — tüm BBB constraint mesajları
+            // bu locale ile doldurulur; bkz. I18nProviderConfiguration.
+            validator.setLocale(dssValidationLocale);
+
             if (detachedContent != null) {
                 validator.setDetachedContents(java.util.Collections.singletonList(detachedContent));
             }
@@ -104,12 +121,17 @@ public class SignatureVerificationService {
             CertificateVerifier certificateVerifier = createCertificateVerifier();
             validator.setCertificateVerifier(certificateVerifier);
 
-            // Doğrulama yap
+            // Doğrulama TEK SEFER koş. DSS pipeline'ı (BBB + AdES + LTV/LTA +
+            // OCSP/CRL fetch) maliyetli ve <em>side-effectful</em>: her
+            // {@code validateDocument()} çağrısında tüm aşamalar baştan
+            // koşar, OCSP responder yeniden vurulur, BestSignatureTime
+            // hesaplamasında saniye-seviyesi varyasyon oluşabilir. Tek bir
+            // {@link Reports} nesnesi tüm parsing ve audit akışları için
+            // kullanılır; bu hem perf hem de <em>tutarlılık</em> garantisi.
             Reports reports = validator.validateDocument();
-            SimpleReport simpleReport = reports.getSimpleReport();
 
             // Sonuçları parse et
-            VerificationResult result = parseVerificationResult(simpleReport, validator, level);
+            VerificationResult result = parseVerificationResult(reports, level);
 
             logger.info("Signature verification completed. Valid: {}", result.isValid());
 
@@ -175,13 +197,23 @@ public class SignatureVerificationService {
     }
 
     /**
-     * Doğrulama sonuçlarını parse eder
+     * Doğrulama sonuçlarını parse eder.
+     *
+     * <p><strong>Single-validation contract</strong>: Bu method ve çağırdığı
+     * yardımcılar yalnızca dışarıdan iletilen <em>tek</em> {@link Reports}
+     * nesnesini okur — DSS pipeline'ı yeniden tetiklemez. Bkz.
+     * {@link #verifySignature} method'undaki "DSS pipeline tek seferde koş"
+     * yorumu.</p>
+     *
+     * <p><em>Visibility:</em> {@code package-private}, golden test matrisinin
+     * (bkz. {@code SignatureVerificationServiceSingleValidationTest}) bu
+     * kontratı sabitlemesi için.</p>
      */
-    private VerificationResult parseVerificationResult(
-            SimpleReport simpleReport,
-            SignedDocumentValidator validator,
+    VerificationResult parseVerificationResult(
+            Reports reports,
             VerificationLevel level) {
 
+        SimpleReport simpleReport = reports.getSimpleReport();
         VerificationResult result = new VerificationResult();
 
         List<String> signatureIds = simpleReport.getSignatureIdList();
@@ -210,7 +242,7 @@ public class SignatureVerificationService {
             }
 
             // İmza bilgilerini doldur (basit veya kapsamlı)
-            populateSignatureInfo(sigInfo, simpleReport, signatureId, validator, level);
+            populateSignatureInfo(sigInfo, reports, signatureId, level);
 
             signatureInfos.add(sigInfo);
         }
@@ -220,7 +252,7 @@ public class SignatureVerificationService {
         result.setSignatures(signatureInfos);
 
         // Signature type belirle
-        determineSignatureType(result, validator);
+        determineSignatureType(result, simpleReport);
 
         // Validation details (comprehensive için)
         if (level == VerificationLevel.COMPREHENSIVE) {
@@ -231,15 +263,19 @@ public class SignatureVerificationService {
     }
 
     /**
-     * İmza bilgilerini doldurur (basit veya kapsamlı)
+     * İmza bilgilerini doldurur (basit veya kapsamlı).
+     *
+     * <p>Sertifika bilgisi <em>aynı</em> {@link Reports} nesnesinden alınan
+     * {@link eu.europa.esig.dss.diagnostic.DiagnosticData} üzerinden okunur —
+     * DSS pipeline'ı yeniden tetiklenmez.</p>
      */
     private void populateSignatureInfo(
             SignatureInfo sigInfo,
-            SimpleReport report,
+            Reports reports,
             String signatureId,
-            SignedDocumentValidator validator,
             VerificationLevel level) {
 
+        SimpleReport report = reports.getSimpleReport();
         try {
             // Temel bilgiler (her iki seviyede de)
             if (report.getSignatureFormat(signatureId) != null) {
@@ -260,10 +296,12 @@ public class SignatureVerificationService {
             sigInfo.setValidationErrors(errors);
             sigInfo.setValidationWarnings(warnings);
 
-            // Sertifika bilgileri (her iki seviyede de)
+            // Sertifika bilgileri (her iki seviyede de) — daha önce alınan
+            // Reports nesnesinden DiagnosticData okunur; ek validateDocument
+            // çağrısı YOK.
             try {
                 List<eu.europa.esig.dss.diagnostic.SignatureWrapper> signatures =
-                        validator.validateDocument().getDiagnosticData().getSignatures();
+                        reports.getDiagnosticData().getSignatures();
 
                 if (signatures != null && !signatures.isEmpty()) {
                     eu.europa.esig.dss.diagnostic.SignatureWrapper sigWrapper = signatures.get(0);
@@ -349,17 +387,20 @@ public class SignatureVerificationService {
     }
 
     /**
-     * İmza tipini belirler
+     * İmza tipini belirler.
+     *
+     * <p>Daha önce alınan {@link SimpleReport} üzerinden okuma yapılır;
+     * DSS pipeline yeniden tetiklenmez (single-validation contract).</p>
      */
-    private void determineSignatureType(VerificationResult result, SignedDocumentValidator validator) {
+    private void determineSignatureType(VerificationResult result, SimpleReport simpleReport) {
         try {
-            // DSS 6.3'te mimetype farklı şekilde alınıyor
-            Reports reports = validator.validateDocument();
-            if (reports != null && reports.getSimpleReport() != null &&
-                    !reports.getSimpleReport().getSignatureIdList().isEmpty()) {
+            if (simpleReport != null && !simpleReport.getSignatureIdList().isEmpty()) {
 
-                String signatureId = reports.getSimpleReport().getSignatureIdList().get(0);
-                String format = reports.getSimpleReport().getSignatureFormat(signatureId).toString();
+                String signatureId = simpleReport.getSignatureIdList().get(0);
+                if (simpleReport.getSignatureFormat(signatureId) == null) {
+                    return;
+                }
+                String format = simpleReport.getSignatureFormat(signatureId).toString();
 
                 if (format.contains("PAdES")) {
                     result.setSignatureType(SignatureType.PADES);

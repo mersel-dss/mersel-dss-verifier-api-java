@@ -361,7 +361,121 @@
     </dependencies>
 
     <build>
+        <!--
+            Resource filtering — dss-messages*.properties exclude
+            ===========================================================
+            DSS i18n bundle dosyalarımız UTF-8 olarak yazılır
+            (src/main/resources/dss-messages_tr.properties), ama runtime'da
+            ResourceBundle/PropertyResourceBundle ASCII escape (\uXXXX)
+            ister (Java 8 ISO-8859-1 default, Java 9+ JVM flag'lerine
+            duyarlı). Bu nedenle:
+
+              1) maven-resources-plugin bu dosyayı target/classes'a
+                 KOPYALAMAMALI — aksi halde UTF-8 byte'lar runtime'da
+                 mojibake'e ("GÃ¼ven" yerine "Güven") yol açar.
+              2) Yerine maven-antrun-plugin (aşağıda) aynı phase'te
+                 (process-resources) Ant <native2ascii> task'ı ile
+                 escape edilmiş hâli üretir.
+
+            <excludes> bu dosyaların kanalını TEK olarak antrun yapar —
+            IDE incremental builds'de bile çakışma riski olmaz.
+        -->
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <excludes>
+                    <exclude>dss-messages*.properties</exclude>
+                </excludes>
+            </resource>
+        </resources>
+
         <plugins>
+            <!--
+                maven-antrun-plugin — UTF-8 → native2ascii dönüşümü
+                ===========================================================
+                NEDEN BU PLUGIN?
+                  DSS i18n bundle'ı (`dss-messages_tr.properties`) ResourceBundle
+                  üzerinden okunuyor. Java 8'de PropertyResourceBundle default
+                  ISO-8859-1 ile parse eder; Java 9+'da JVM flag'lerine duyarlı
+                  davranış gösterir. UTF-8 olarak depolanan Türkçe karakterler
+                  bazı runtime'larda mojibake (örn. "GÃ¼ven hizmeti" yerine
+                  "Güven hizmeti") üretiyordu.
+
+                  Çözüm: kaynak dosyaları UTF-8 (insan-okur) olarak STANDART
+                  `src/main/resources/` altında tutuyoruz; geliştirici klasik
+                  konumda Türkçe karakterleri doğrudan yazar (İmza, Sertifika,
+                  güven, ...). Build sırasında non-ASCII karakterleri Unicode
+                  escape (\uXXXX) ile değiştirip `target/classes/`'a yazıyoruz.
+                  Java PropertyResourceBundle ASCII escape'leri encoding'den
+                  bağımsız olarak doğru çevirir.
+
+                ÇALIŞMA YERI:
+                  • Source : src/main/resources/dss-messages*.properties (UTF-8)
+                  • Output : target/classes/dss-messages*.properties (escape'li)
+                  • Phase  : process-resources
+                            (Yukarıdaki <build><resources> bloğunda
+                             dss-messages*.properties exclude edildiği için
+                             maven-resources-plugin bu dosyaları KOPYALAMAZ;
+                             yalnız antrun escape edilmiş hâli yazar. Tek
+                             kanal = encoding tutarlılığı.)
+
+                ANT NATIVE2ASCII TASK'I:
+                  Apache Ant 1.10.x'in <native2ascii> task'ı kendi internal
+                  Java implementation'ı sağlar — JDK 9+'da kaldırılan
+                  `sun.tools.native2ascii` toolchain'ine bağımlı DEĞİLDİR.
+                  Plugin'in dependencies bloğunda Ant'i pin'liyoruz çünkü
+                  maven-antrun-plugin 3.x default'unda eski Ant getirebilir.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <!--
+                    Version pin'lendi — reproducible build. maven-antrun-plugin
+                    3.x serisi Java 8+ uyumlu, Apache Ant 1.10 transitive ile
+                    çalışır. Versiyonu pin'lemezsek Maven Central'dan default
+                    plugin sürümü gelir; gelecekte breaking change (örn. yeni
+                    parameter, eski Ant version drop) build'i sessizce
+                    bozabilir. 3.1.0 itibariyle stabil ve aktif maintained.
+                -->
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>utf8-properties-native2ascii</id>
+                        <phase>process-resources</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target>
+                                <mkdir dir="${project.build.outputDirectory}"/>
+                                <native2ascii src="${basedir}/src/main/resources"
+                                              dest="${project.build.outputDirectory}"
+                                              encoding="UTF-8"
+                                              includes="dss-messages*.properties"/>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+                <dependencies>
+                    <!--
+                        Apache Ant 1.10.x — native2ascii task'ı buradan gelir.
+                        1.10.x serisi Java 8+ uyumlu, hâlâ aktif maintained.
+                        ant-launcher Ant runtime'ı için zorunlu; ant-nodeps
+                        eski sürümlerden kalan opsiyonel dependency'leri kapsar.
+                    -->
+                    <dependency>
+                        <groupId>org.apache.ant</groupId>
+                        <artifactId>ant</artifactId>
+                        <version>1.10.14</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.apache.ant</groupId>
+                        <artifactId>ant-launcher</artifactId>
+                        <version>1.10.14</version>
+                    </dependency>
+                </dependencies>
+            </plugin>
+
             <!--
                 spring-boot-maven-plugin: repackage + build-info goal.
                 ===========================================================

@@ -40,6 +40,13 @@ services:
       # Default: true (KamuSM/GIB ecosystem parity with TUBITAK Imzager).
       # Set to false for strict eIDAS-QES behavior.
       - TR_LEGACY_XADES_TOLERANCE=${TR_LEGACY_XADES_TOLERANCE:-true}
+      # NOT: v2.0/v2.1'de buraya bir TR_LEGACY_XADES_RE_VALIDATION env var
+      # eklenmisti (cryptographic re-validation katmani). v2.2'de katman
+      # tasarim hatasi nedeniyle kaldirildi (Type URI imza kapsaminda
+      # oldugu icin byte stream'inde degistirmek SignatureValue'yi
+      # bozar; layer her zaman SIG_CRYPTO_FAILURE dondururdu). Eski env
+      # var artik OKUNMAZ; Spring Boot bilinmeyen property'leri sessizce
+      # yok sayar. Gate v2.2 allow-list-only mantiga dustu.
 
       # ===================================================================
       # INVALID Signature Notifications (webhook + Slack)

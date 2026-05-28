@@ -49,10 +49,11 @@ internal sealed class SignatureVerifier : DssVerifierHttpBase, ISignatureVerifie
             throw new ArgumentException("İmzalı doküman içeriği boş olamaz.", nameof(request));
 
         Logger.LogDebug(
-            "DSS Verifier signature isteği — boyut: {Boyut} bayt, detached: {Detached}, seviye: {Seviye}",
+            "DSS Verifier signature isteği — boyut: {Boyut} bayt, detached: {Detached}, seviye: {Seviye}, includeFailedConstraints: {IncludeFC}",
             request.SignedDocument.Length,
             request.OriginalDocument is not null,
-            request.Level);
+            request.Level,
+            request.IncludeFailedConstraints);
 
         using var form = new MultipartFormDataContent();
         AddFilePart(form, "signedDocument", request.SignedDocument, request.SignedDocumentFileName);
@@ -61,6 +62,13 @@ internal sealed class SignatureVerifier : DssVerifierHttpBase, ISignatureVerifie
             AddFilePart(form, "originalDocument", request.OriginalDocument, request.OriginalDocumentFileName);
         }
         AddStringPart(form, "level", request.Level.ToString());
+        // includeFailedConstraints: sunucu tarafında @RequestParam(defaultValue="false")
+        // — sadece true verildiğinde gönderiyoruz; default akış multipart payload'ı
+        // gereksiz yere şişmesin (sunucu varsayılan davranışı zaten false).
+        if (request.IncludeFailedConstraints)
+        {
+            AddStringPart(form, "includeFailedConstraints", "true");
+        }
 
         return await PostMultipartJsonAsync<VerificationResult>(
             "api/v1/verify/signature", form, ct, request.Headers).ConfigureAwait(false);
