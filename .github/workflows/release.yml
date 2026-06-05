@@ -96,9 +96,15 @@ jobs:
         id: ts
         shell: bash
         run: |
-          BUILD_TS=$(git log -1 --format=%cI HEAD)
+          # git %cI offset'li ISO verir (örn. 2026-06-06T00:03:42+03:00).
+          # Spring Boot build-info goal'u ve project.build.outputTimestamp ise
+          # UTC + literal 'Z' bekler; offset'li deger 'index 19' parse hatasi
+          # verir. Bu yuzden commit epoch'unu UTC 'Z' formatina ceviriyoruz
+          # (pom.xml maven.build.timestamp.format = yyyy-MM-dd'T'HH:mm:ss'Z' ile uyumlu).
+          EPOCH=$(git log -1 --format=%ct HEAD)
+          BUILD_TS=$(date -u -d "@${EPOCH}" +%Y-%m-%dT%H:%M:%SZ)
           echo "build_ts=$BUILD_TS" >> "$GITHUB_OUTPUT"
-          echo "Reproducible build timestamp: $BUILD_TS"
+          echo "Reproducible build timestamp (UTC): $BUILD_TS"
 
       - name: Build & test (provenance metadata gömülü)
         env:
