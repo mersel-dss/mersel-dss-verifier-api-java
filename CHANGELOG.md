@@ -7,6 +7,8 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-06-05
+
 ## [1.0.0] - 2026-05-28
 
 ### Fixed
