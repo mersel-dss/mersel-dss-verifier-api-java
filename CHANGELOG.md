@@ -7,6 +7,21 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+### Fixed
+- **SHA1 özet algoritması kullanan mali mühür imzaları artık doğrulanabiliyor**
+  ([#3](https://github.com/mersel-dss/mersel-dss-verifier-api-java/issues/3)) —
+  Bazı mali mühür imzalarında `SignedProperties` referansı ve `CertDigest`
+  kısımlarında SHA1 özet algoritması kullanılmaktadır. `AcceptableDigestAlgo`
+  beyaz listesinde SHA1 bulunmaması ve `AlgoExpirationDate`'te 2012-08-01
+  tarihiyle geçersiz sayılması, DSS'in `CRYPTO_CONSTRAINTS_FAILURE_NO_POE`
+  hatasıyla imzayı reddetmesine sebep oluyordu.
+
+  Her iki üretim policy dosyasına (`kamusm-signer-strict-constraint.xml`,
+  `kamusm-strict-constraint.xml`) SHA1 `AcceptableDigestAlgo` listesine
+  eklendi ve `AlgoExpirationDate`'ten kaldırıldı. İmza algoritması
+  (SignatureMethod) SHA256 olan, yalnızca referans/CertDigest özetinde
+  SHA1 kullanan belgeler artık başarılı şekilde doğrulanmaktadır.
+
 ## [1.0.1] - 2026-06-05
 
 ## [1.0.0] - 2026-05-28
