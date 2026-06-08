@@ -7,6 +7,8 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-06-08
+
 ### Fixed
 - **SHA1 özet algoritması kullanan mali mühür imzaları artık doğrulanabiliyor**
   ([#3](https://github.com/mersel-dss/mersel-dss-verifier-api-java/issues/3)) —
