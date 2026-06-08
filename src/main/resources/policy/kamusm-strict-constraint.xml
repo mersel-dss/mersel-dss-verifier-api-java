@@ -573,11 +573,13 @@
 			<Algo Size="256">PLAIN-ECDSA</Algo>
 		</MiniPublicKeySize>
 		<!--
-		    AcceptableDigestAlgo — MD5 ve SHA1 prod kabul listesinden
-		    çıkarıldı. AlgoExpirationDate altındaki entries tarihsel
-		    forensic için korunur.
+		    AcceptableDigestAlgo — MD5 prod kabul listesinden
+		    çıkarıldı. SHA1, bazı eski mali mühür imzalarında
+		    SignedProperties/CertDigest referanslarında
+		    kullanıldığı için kabul edilmektedir.
 		-->
 		<AcceptableDigestAlgo>
+			<Algo>SHA1</Algo>
 			<Algo>SHA224</Algo>
 			<Algo>SHA256</Algo>
 			<Algo>SHA384</Algo>
@@ -590,7 +592,6 @@
 		</AcceptableDigestAlgo>
 		<AlgoExpirationDate Level="FAIL" Format="yyyy-MM-dd" UpdateDate="2024-10-13" LevelAfterUpdate="WARN">
 			<Algo Date="2004-08-01">MD5</Algo>
-			<Algo Date="2012-08-01">SHA1</Algo>
 			<Algo Date="2029-01-01">SHA224</Algo>
 			<Algo>SHA256</Algo>
 			<Algo>SHA384</Algo>
