@@ -8,6 +8,7 @@ import eu.europa.esig.dss.spi.x509.revocation.crl.CRLToken;
 import eu.europa.esig.dss.spi.x509.revocation.ocsp.OCSPSource;
 import eu.europa.esig.dss.spi.x509.revocation.ocsp.OCSPToken;
 import eu.europa.esig.dss.spi.x509.tsp.TimestampToken;
+import eu.europa.esig.dss.spi.x509.CommonTrustedCertificateSource;
 import eu.europa.esig.dss.model.x509.CertificateToken;
 import io.mersel.dss.verify.api.config.VerificationConfiguration;
 import io.mersel.dss.verify.api.dtos.TimestampVerificationResponseDto;
@@ -17,7 +18,13 @@ import io.mersel.dss.verify.api.models.RevocationInfo;
 import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService;
 import io.mersel.dss.verify.api.services.util.CertificateInfoExtractor;
 import io.mersel.dss.verify.api.services.util.RevocationInfoExtractor;
+import org.bouncycastle.cert.X509CertificateHolder;
+import org.bouncycastle.cms.CMSSignedData;
+import org.bouncycastle.cms.SignerInformationVerifier;
+import org.bouncycastle.cms.jcajce.JcaSimpleSignerInfoVerifierBuilder;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.tsp.TimeStampResponse;
+import org.bouncycastle.tsp.TimeStampToken;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -28,6 +35,7 @@ import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.Date;
 import java.util.List;
 
@@ -188,21 +196,71 @@ public class AdvancedTimestampVerificationService {
     }
 
     /**
-     * Timestamp bütünlüğünü doğrular (RFC 3161 signature validation)
+     * Timestamp bütünlüğünü doğrular (RFC 3161 signature validation).
+     *
+     * <p><strong>Onceki hata:</strong> {@code new TimeStampResponse(bytes)} her
+     * girdinin tam bir {@code TimeStampResp} (PKIStatusInfo + token) oldugunu
+     * varsayiyordu. Oysa agent'in (ve cogu KamuSM aracinin) urettigi ciktilar
+     * <em>ciplak</em> {@code TimeStampToken} (CMS SignedData) olabiliyor.
+     * Bu durumda kurucu ASN.1 parse hatasiyla patlayip {@code false} donuyor,
+     * boylece gecerli bir timestamp bile "butunlugu bozulmus" hatasi aliyordu.
+     *
+     * <p><strong>Yeni davranis:</strong> Once ciplak token, olmazsa tam response
+     * olarak parse edip {@code TimeStampToken}'i elde ediyoruz; ardindan token'in
+     * <em>kendi icine gomulu</em> TSA sertifikasi ile imzayi gercekten dogruluyoruz.
+     * Bu, hem RFC 3161 imza butunlugunu dogrular hem de iki cikti bicimini de
+     * (.tsq/.tst ciplak token ve .tsr response) destekler.
      */
     private boolean verifyTimestampIntegrity(TimestampToken token, byte[] timestampBytes) {
+        TimeStampToken bcToken = extractBcTimeStampToken(timestampBytes);
+        if (bcToken == null) {
+            logger.error("Timestamp integrity check failed: token RFC 3161 olarak parse edilemedi");
+            return false;
+        }
+
         try {
-            // TimeStampResponse ile doğrulama
-            TimeStampResponse response = new TimeStampResponse(timestampBytes);
-            response.validate(null); // Basic ASN.1 validation
-            
-            // DSS 6.3'te signature validation farklı yapılıyor
-            // Token'ın parse edilmiş olması bütünlüğün geçerli olduğunu gösterir
+            @SuppressWarnings("unchecked")
+            Collection<X509CertificateHolder> signerCerts =
+                    bcToken.getCertificates().getMatches(bcToken.getSID());
+            if (signerCerts.isEmpty()) {
+                logger.warn("Timestamp token imzaci (TSA) sertifikasini gomulu tasimiyor; "
+                        + "imza butunlugu dogrulanamadi");
+                return false;
+            }
+
+            X509CertificateHolder signerCert = signerCerts.iterator().next();
+            SignerInformationVerifier verifier = new JcaSimpleSignerInfoVerifierBuilder()
+                    .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+                    .build(signerCert);
+
+            // TSTInfo uzerindeki TSA imzasini dogrular — basarisizsa exception firlatir.
+            bcToken.validate(verifier);
             return true;
-            
+
         } catch (Exception e) {
             logger.error("Timestamp integrity check failed: {}", e.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * Ham byte dizisinden BouncyCastle {@link TimeStampToken}'i elde eder.
+     * Once ciplak CMS {@code TimeStampToken} (.tsq/.tst), olmazsa tam
+     * {@code TimeStampResponse} (.tsr) olarak dener.
+     */
+    private TimeStampToken extractBcTimeStampToken(byte[] timestampBytes) {
+        try {
+            return new TimeStampToken(new CMSSignedData(timestampBytes));
+        } catch (Exception bareTokenFailure) {
+            logger.debug("Ciplak TimeStampToken parse edilemedi, TimeStampResponse deneniyor: {}",
+                    bareTokenFailure.getMessage());
+        }
+        try {
+            TimeStampResponse response = new TimeStampResponse(timestampBytes);
+            return response.getTimeStampToken();
+        } catch (Exception responseFailure) {
+            logger.debug("TimeStampResponse parse de basarisiz: {}", responseFailure.getMessage());
+            return null;
         }
     }
 
@@ -300,17 +358,27 @@ public class AdvancedTimestampVerificationService {
             }
 
             // 3. Trust anchor kontrolü
-            boolean isTrusted = rootCertificateService.isTrusted(tsaCert);
-            
+            // Token genelde yalnizca TSA leaf sertifikasini tasir; guven deposunda
+            // ise KamuSM kok (ve ara) sertifikalari bulunur. Bu yuzden birebir
+            // uyelik (`isTrusted`) yerine zincir kurma (`isChainTrusted`) kullaniyoruz:
+            // leaf -> issuer(kok) zincirini token icindeki sertifikalar + guven
+            // deposu uzerinden dogruluyoruz. XAdES tarafindaki DSS CertificateVerifier
+            // davranisinin RFC 3161 timestamp karsiligi.
+            boolean isTrusted = rootCertificateService.isChainTrusted(tsaCert, certificates);
+            // Response'taki tsaCertificate.trusted alanini da senkron tut — aksi
+            // halde dogrulama VALID donerken sertifika "trusted: false" gorunup
+            // tutarsizlik yaratiyordu.
+            certInfo.setTrusted(isTrusted);
+
             if (!isTrusted) {
                 warnings.add("TSA sertifikası güvenilir bir root'a zincirlenemiyor");
             } else {
-                logger.info("TSA certificate is trusted");
+                logger.info("TSA certificate chains to a trusted KamuSM root");
             }
 
             // 4. Revocation kontrolü (online validation aktifse)
             if (config.isOnlineValidationEnabled()) {
-                CertificateToken issuerCert = findIssuerCertificate(tsaCert, certificates);
+                CertificateToken issuerCert = resolveIssuerCertificate(tsaCert, certificates);
                 RevocationCheckResult revocationResult = checkRevocation(tsaCert, issuerCert);
                 if (!revocationResult.isValid()) {
                     errors.add(revocationResult.getError());
@@ -327,6 +395,12 @@ public class AdvancedTimestampVerificationService {
                     warnings.add(revocationResult.getWarning());
                 }
             }
+
+            // Tum kontroller sonrasi TSA sertifikasinin nihai gecerliligi:
+            // guvenilir koke zincirleniyor + suresi gecerli + iptal edilmemis.
+            // (Extractor bu alani set etmez; default false kaliyordu — trusted
+            // iken bile "valid: false" gorunmesi tutarsizdi.)
+            certInfo.setValid(isTrusted && !certInfo.isExpired() && !certInfo.isRevoked());
 
         } catch (Exception e) {
             logger.error("TSA certificate validation failed: {}", e.getMessage());
@@ -462,6 +536,36 @@ public class AdvancedTimestampVerificationService {
             if (issuerDn != null && issuerDn.equals(candidate.getSubject().getCanonical())) {
                 return candidate;
             }
+        }
+        return null;
+    }
+
+    /**
+     * TSA sertifikasinin issuer'ini once token icinden, bulunamazsa guven
+     * deposundan (KamuSM kokleri) cozer.
+     *
+     * <p>KamuSM TSA token'lari genelde yalnizca leaf sertifikayi gomer; issuer
+     * (kok) token icinde gelmez. Eskiden issuer yalnizca token icinde arandigi
+     * icin bulunamiyor, revocation kontrolu komple atlaniyor ve "issuer
+     * bulunamadi" uyarisi olusuyordu. Artik leaf'i gercekten imzalamis kok'u
+     * guven deposundan bulup CRL/OCSP revocation kontrolune sokabiliyoruz.
+     */
+    private CertificateToken resolveIssuerCertificate(CertificateToken tsaCert, List<CertificateToken> chain) {
+        CertificateToken issuer = findIssuerCertificate(tsaCert, chain);
+        if (issuer != null) {
+            return issuer;
+        }
+        try {
+            CommonTrustedCertificateSource trustedSource = rootCertificateService.getTrustedCertificateSource();
+            if (trustedSource != null) {
+                for (CertificateToken candidate : trustedSource.getBySubject(tsaCert.getIssuer())) {
+                    if (tsaCert.isSignedBy(candidate)) {
+                        return candidate;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Issuer lookup from trusted source failed: {}", e.getMessage());
         }
         return null;
     }

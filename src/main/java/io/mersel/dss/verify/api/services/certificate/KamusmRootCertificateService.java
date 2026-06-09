@@ -12,7 +12,10 @@ import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
 import java.security.cert.X509Certificate;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Güvenilir kök sertifika servisi (wrapper)
@@ -87,5 +90,84 @@ public class KamusmRootCertificateService {
 
     public boolean isTrusted(CertificateToken certificate) {
         return resolver.isTrusted(certificate);
+    }
+
+    /**
+     * Bir sertifikanin guvenilir bir KamuSM kokune <em>zincirlenebilir</em>
+     * olup olmadigini kontrol eder.
+     *
+     * <p>{@link #isTrusted(CertificateToken)} yalnizca <strong>birebir uyelik</strong>
+     * kontrolu yapar (sertifikanin kendisi guven deposunda mi?). Bu, imzaci/TSA
+     * <em>leaf</em> sertifikalari icin neredeyse her zaman {@code false} doner —
+     * cunku guven deposunda yalnizca kok (ve ara) sertifikalar bulunur, leaf'in
+     * kendisi degil. XAdES tarafinda DSS {@code CertificateVerifier} bu zinciri
+     * otomatik kurarken, RFC 3161 timestamp token'lari icin elle dogrulama
+     * yaptigimizdan bu zincir kurma adimi eksikti; sonucta gecerli KamuSM TSA
+     * sertifikalari bile "guvenilir kok'e zincirlenemiyor" uyarisi aliyordu.
+     *
+     * <p>Strateji: {@code certificate}'tan baslayarak issuer DN'i guven
+     * deposundaki bir sertifikanin subject'i ile eslesen ve imza dogrulamasi
+     * gecen bir kok bulunana kadar zinciri yukari tirmaniriz. Ara sertifikalar
+     * ({@code chainCandidates}) genelde timestamp token'i icinden gelir; token
+     * yalnizca leaf tasiyorsa dahi, leaf'in issuer'i (kok) depoda bulundugunda
+     * trust kurulur.
+     *
+     * @param certificate     dogrulanacak leaf sertifika (orn. TSA sertifikasi)
+     * @param chainCandidates zincir kurarken kullanilabilecek ek ara sertifikalar
+     *                        (orn. token icindeki sertifikalar); {@code null} olabilir
+     * @return guvenilir bir koke zincirlenebiliyorsa {@code true}
+     */
+    public boolean isChainTrusted(CertificateToken certificate, List<CertificateToken> chainCandidates) {
+        if (certificate == null) {
+            return false;
+        }
+
+        CommonTrustedCertificateSource trustedSource = resolver.getTrustedCertificateSource();
+        if (trustedSource == null) {
+            return false;
+        }
+
+        List<CertificateToken> pool = chainCandidates != null ? chainCandidates : Collections.emptyList();
+        CertificateToken current = certificate;
+        Set<CertificateToken> visited = new HashSet<>();
+
+        // Sonsuz donguye karsi makul bir derinlik siniri.
+        for (int depth = 0; current != null && depth < 16 && visited.add(current); depth++) {
+            // (a) Mevcut sertifikanin issuer'i guven deposunda bir kok/ara
+            //     sertifika ise ve onu gercekten imzalamissa -> trust kuruldu.
+            for (CertificateToken anchor : trustedSource.getBySubject(current.getIssuer())) {
+                if (current.isSignedBy(anchor)) {
+                    logger.debug("Trust anchor bulundu: '{}' tarafindan imzalanmis '{}'",
+                            anchor.getSubject().getPrettyPrintRFC2253(),
+                            current.getSubject().getPrettyPrintRFC2253());
+                    return true;
+                }
+            }
+
+            // (b) Mevcut sertifikanin kendisi dogrudan guven deposundaysa
+            //     (orn. self-signed kok token icine gomulu gelmis) -> trust.
+            for (CertificateToken anchor : trustedSource.getBySubject(current.getSubject())) {
+                if (anchor.equals(current)) {
+                    return true;
+                }
+            }
+
+            // Self-signed bir koke ulastik ama depoda degil -> zincir burada biter.
+            if (current.isSelfSigned()) {
+                break;
+            }
+
+            // (c) Aksi halde token'dan gelen ara sertifikalarla bir ust basamaga tirman.
+            CertificateToken next = null;
+            for (CertificateToken candidate : pool) {
+                if (!candidate.equals(current) && current.isSignedBy(candidate)) {
+                    next = candidate;
+                    break;
+                }
+            }
+            current = next;
+        }
+
+        return false;
     }
 }

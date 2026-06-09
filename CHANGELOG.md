@@ -7,6 +7,61 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+### Fixed
+- **Geçerli RFC 3161 zaman damgaları artık `VALID` doğrulanıyor (false-negative fix)** —
+  `/api/v1/verify/timestamp` endpoint'i, çıplak `TimeStampToken` (CMS `SignedData`;
+  `.tsq`/`.tst`) biçiminde gelen zaman damgalarını her zaman geçersiz sayıyordu.
+  Sebep [`AdvancedTimestampVerificationService.verifyTimestampIntegrity`](src/main/java/io/mersel/dss/verify/api/services/timestamp/AdvancedTimestampVerificationService.java)
+  içindeki `new TimeStampResponse(bytes)` çağrısıydı: bu kurucu her girdinin tam
+  bir `TimeStampResp` (`PKIStatusInfo` + token) olmasını bekler, çıplak token'da
+  ASN.1 parse hatasıyla patlar ve **"Zaman damgası bütünlüğü bozulmuş - imza
+  doğrulaması başarısız"** hatasıyla sonuç `INVALID` dönerdi. Üretilen çıktının
+  kriptografik olarak sağlam olmasına rağmen (TÜBİTAK/KamuSM TSA'larının yaygın
+  çıktı biçimi) doğrulama başarısızdı.
+
+  Artık ham bayt dizisi önce çıplak `TimeStampToken`, olmazsa tam
+  `TimeStampResponse` (`.tsr`) olarak parse edilip token'ın **gömülü TSA
+  sertifikasıyla** RFC 3161 imzası gerçekten doğrulanıyor
+  (`JcaSimpleSignerInfoVerifierBuilder`). Bu hem false-negative'i giderir hem de
+  her iki çıktı biçimini destekler; imzası kurcalanmış token'lar yine `INVALID`
+  döner (bozuk yapı `INVALID_FORMAT`, kırık imza "bütünlüğü bozulmuş").
+
+- **TSA sertifikası güvenilir KamuSM köküne artık zincirlenebiliyor** —
+  Eski güven kontrolü ([`KamusmRootCertificateService.isTrusted`](src/main/java/io/mersel/dss/verify/api/services/certificate/KamusmRootCertificateService.java))
+  yalnızca **birebir üyelik** bakıyordu (`trustedCertificateSource.getCertificates().contains(cert)`).
+  Timestamp token'ı genelde yalnızca TSA *leaf* sertifikasını taşır; güven
+  deposunda ise KamuSM *kök* sertifikaları bulunur. Bu yüzden geçerli KamuSM TSA
+  sertifikaları bile **"TSA sertifikası güvenilir bir root'a zincirlenemiyor"**
+  uyarısı alıyordu (XAdES tarafı DSS `CertificateVerifier` ile bu zinciri zaten
+  otomatik kuruyordu — RFC 3161 yolunda eksikti).
+
+  Yeni [`KamusmRootCertificateService.isChainTrusted(CertificateToken, List)`](src/main/java/io/mersel/dss/verify/api/services/certificate/KamusmRootCertificateService.java)
+  metodu, leaf → issuer(kök) zincirini token içindeki sertifikalar + KamuSM güven
+  deposu üzerinden imza doğrulamasıyla kuruyor (XAdES davranışının RFC 3161
+  karşılığı). Sonuç `tsaCertificate.trusted` alanına da yansıtılıyor.
+
+### Changed
+- **Timestamp doğrulamada TSA issuer'ı güven deposundan çözülüyor; revocation
+  artık çalışıyor** — KamuSM TSA token'ları issuer (kök) sertifikayı gömmediği
+  için issuer yalnızca token içinde aranıyor, bulunamayınca revocation komple
+  atlanıyordu ("issuer bulunamadı; revocation atlandı" uyarısı). Yeni
+  `resolveIssuerCertificate(...)`, issuer'ı token'da bulamazsa güven deposundaki
+  KamuSM köklerinden çözüyor; böylece TSA leaf için CRL/OCSP iptal kontrolü
+  yapılabiliyor ve `tsaCertificate.revocation` alanı doluyor.
+- **`tsaCertificate.valid` alanı tutarlı set ediliyor** — [`CertificateInfoExtractor`](src/main/java/io/mersel/dss/verify/api/services/util/CertificateInfoExtractor.java)
+  bu alanı set etmediği için primitive default `false` kalıyor, sertifika
+  güvenilir/geçerli olsa bile `trusted: true` iken `valid: false` gibi tutarsız
+  görünüyordu. Artık tüm kontroller sonrası `valid = trusted && !expired && !revoked`
+  olarak hesaplanıyor.
+
+> Not: Bu sürümdeki değişiklikler **yalnızca zaman damgası (RFC 3161) doğrulama
+> akışını** etkiler ([`TimestampVerificationService`](src/main/java/io/mersel/dss/verify/api/services/timestamp/TimestampVerificationService.java)
+> ve [`AdvancedTimestampVerificationService`](src/main/java/io/mersel/dss/verify/api/services/timestamp/AdvancedTimestampVerificationService.java)).
+> `KamusmRootCertificateService`'e yalnızca **yeni** `isChainTrusted` metodu
+> eklendi; mevcut `isTrusted` ve diğer metotlar değişmedi. XAdES/PAdES/CAdES imza
+> doğrulama yolu DSS'in kendi `CertificateWrapper.isTrusted()` (DiagnosticData)
+> değerlendirmesini kullandığından bu değişikliklerden **etkilenmez**.
+
 ## [1.0.2] - 2026-06-08
 
 ### Fixed

@@ -8,6 +8,7 @@ import eu.europa.esig.dss.spi.x509.revocation.crl.CRLToken;
 import eu.europa.esig.dss.spi.x509.revocation.ocsp.OCSPSource;
 import eu.europa.esig.dss.spi.x509.revocation.ocsp.OCSPToken;
 import eu.europa.esig.dss.spi.x509.tsp.TimestampToken;
+import eu.europa.esig.dss.spi.x509.CommonTrustedCertificateSource;
 import eu.europa.esig.dss.model.x509.CertificateToken;
 import io.mersel.dss.verify.api.config.VerificationConfiguration;
 import io.mersel.dss.verify.api.dtos.TimestampVerificationResponseDto;
@@ -17,7 +18,13 @@ import io.mersel.dss.verify.api.models.RevocationInfo;
 import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService;
 import io.mersel.dss.verify.api.services.util.CertificateInfoExtractor;
 import io.mersel.dss.verify.api.services.util.RevocationInfoExtractor;
+import org.bouncycastle.cert.X509CertificateHolder;
+import org.bouncycastle.cms.CMSSignedData;
+import org.bouncycastle.cms.SignerInformationVerifier;
+import org.bouncycastle.cms.jcajce.JcaSimpleSignerInfoVerifierBuilder;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.tsp.TimeStampResponse;
+import org.bouncycastle.tsp.TimeStampToken;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -28,6 +35,7 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.Date;
 import java.util.List;
 
@@ -125,8 +133,11 @@ public class TimestampVerificationService {
                     errors.add("TSA sertifikası geçerlilik süresi dışında");
                 }
 
-                // Güvenilir root kontrolü
-                if (!isCertificateTrusted(tsaCert)) {
+                // Güvenilir root kontrolü — birebir uyelik degil, zincir kurma.
+                // (Detayli aciklama: KamusmRootCertificateService.isChainTrusted)
+                boolean trusted = isCertificateTrusted(tsaCert, tsaChain);
+                certInfo.setTrusted(trusted);
+                if (!trusted) {
                     warnings.add("TSA sertifikası güvenilir bir root'a zincirlenemiyor");
                 }
 
@@ -139,6 +150,10 @@ public class TimestampVerificationService {
                 if (config.isOnlineValidationEnabled()) {
                     enrichTsaRevocation(certInfo, tsaCert, tsaChain, warnings);
                 }
+
+                // Tum kontroller sonrasi TSA sertifikasinin nihai gecerliligi
+                // (trusted + suresi gecerli + iptal edilmemis).
+                certInfo.setValid(trusted && !certInfo.isExpired() && !certInfo.isRevoked());
             }
 
             // 5. Digest algoritması bilgisi
@@ -183,16 +198,60 @@ public class TimestampVerificationService {
     }
 
     /**
-     * Timestamp bütünlüğünü doğrular
+     * Timestamp bütünlüğünü doğrular.
+     *
+     * <p>Ciplak {@code TimeStampToken} (.tsq/.tst) veya tam {@code TimeStampResponse}
+     * (.tsr) girdisini destekler ve token'in gomulu TSA sertifikasi ile RFC 3161
+     * imzasini gercekten dogrular. (Detayli aciklama: ayni adli metot —
+     * {@code AdvancedTimestampVerificationService}.)
      */
     private boolean verifyTimestampIntegrity(TimestampToken token, byte[] timestampBytes) {
+        TimeStampToken bcToken = extractBcTimeStampToken(timestampBytes);
+        if (bcToken == null) {
+            logger.error("Timestamp integrity check failed: token RFC 3161 olarak parse edilemedi");
+            return false;
+        }
+
         try {
-            TimeStampResponse response = new TimeStampResponse(timestampBytes);
-            response.validate(null); // Basic validation
+            @SuppressWarnings("unchecked")
+            Collection<X509CertificateHolder> signerCerts =
+                    bcToken.getCertificates().getMatches(bcToken.getSID());
+            if (signerCerts.isEmpty()) {
+                logger.warn("Timestamp token imzaci (TSA) sertifikasini gomulu tasimiyor; "
+                        + "imza butunlugu dogrulanamadi");
+                return false;
+            }
+
+            X509CertificateHolder signerCert = signerCerts.iterator().next();
+            SignerInformationVerifier verifier = new JcaSimpleSignerInfoVerifierBuilder()
+                    .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+                    .build(signerCert);
+
+            bcToken.validate(verifier);
             return true;
+
         } catch (Exception e) {
             logger.error("Timestamp integrity check failed: {}", e.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * Ham byte dizisinden BouncyCastle {@link TimeStampToken}'i elde eder.
+     * Once ciplak CMS token, olmazsa tam {@code TimeStampResponse} olarak dener.
+     */
+    private TimeStampToken extractBcTimeStampToken(byte[] timestampBytes) {
+        try {
+            return new TimeStampToken(new CMSSignedData(timestampBytes));
+        } catch (Exception bareTokenFailure) {
+            logger.debug("Ciplak TimeStampToken parse edilemedi, TimeStampResponse deneniyor: {}",
+                    bareTokenFailure.getMessage());
+        }
+        try {
+            return new TimeStampResponse(timestampBytes).getTimeStampToken();
+        } catch (Exception responseFailure) {
+            logger.debug("TimeStampResponse parse de basarisiz: {}", responseFailure.getMessage());
+            return null;
         }
     }
 
@@ -232,11 +291,13 @@ public class TimestampVerificationService {
 
 
     /**
-     * Sertifikanın güvenilir olup olmadığını kontrol eder
+     * Sertifikanın güvenilir bir koke zincirlenebilir olup olmadığını kontrol eder.
+     * Birebir uyelik yerine zincir kurma yapar — bkz.
+     * {@link KamusmRootCertificateService#isChainTrusted(CertificateToken, List)}.
      */
-    private boolean isCertificateTrusted(CertificateToken certificate) {
+    private boolean isCertificateTrusted(CertificateToken certificate, List<CertificateToken> chain) {
         try {
-            return rootCertificateService.isTrusted(certificate);
+            return rootCertificateService.isChainTrusted(certificate, chain);
         } catch (Exception e) {
             logger.error("Failed to check certificate trust: {}", e.getMessage());
             return false;
@@ -264,7 +325,7 @@ public class TimestampVerificationService {
             return;
         }
 
-        CertificateToken issuer = findIssuerCertificate(tsaCert, tsaChain);
+        CertificateToken issuer = resolveIssuerCertificate(tsaCert, tsaChain);
         if (issuer == null) {
             warnings.add("TSA sertifikasinin issuer'i timestamp icerisinde bulunamadi; revocation atlandi");
             return;
@@ -320,6 +381,31 @@ public class TimestampVerificationService {
             if (issuerDn != null && issuerDn.equals(candidate.getSubject().getCanonical())) {
                 return candidate;
             }
+        }
+        return null;
+    }
+
+    /**
+     * TSA sertifikasinin issuer'ini once token icinden, bulunamazsa guven
+     * deposundan (KamuSM kokleri) cozer. KamuSM TSA token'lari genelde yalnizca
+     * leaf tasidigi icin issuer cogu zaman ancak guven deposunda bulunur.
+     */
+    private CertificateToken resolveIssuerCertificate(CertificateToken tsaCert, List<CertificateToken> chain) {
+        CertificateToken issuer = findIssuerCertificate(tsaCert, chain);
+        if (issuer != null) {
+            return issuer;
+        }
+        try {
+            CommonTrustedCertificateSource trustedSource = rootCertificateService.getTrustedCertificateSource();
+            if (trustedSource != null) {
+                for (CertificateToken candidate : trustedSource.getBySubject(tsaCert.getIssuer())) {
+                    if (tsaCert.isSignedBy(candidate)) {
+                        return candidate;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Issuer lookup from trusted source failed: {}", e.getMessage());
         }
         return null;
     }
