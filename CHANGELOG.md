@@ -7,6 +7,8 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-06-09
+
 ### Fixed
 - **Geçerli RFC 3161 zaman damgaları artık `VALID` doğrulanıyor (false-negative fix)** —
   `/api/v1/verify/timestamp` endpoint'i, çıplak `TimeStampToken` (CMS `SignedData`;
