@@ -7,6 +7,8 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-06-17
+
 ### Fixed
 - **`HttpTimeout` arızası giderildi — DSS HTTP connection pool yeniden boyutlandırıldı.**
   10 pod'lu üretimde, birkaç saat çalıştıktan sonra verifier'a gelen isteklerde
