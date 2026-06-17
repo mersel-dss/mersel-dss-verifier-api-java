@@ -61,12 +61,30 @@ public class LoggingCachingOCSPSource implements OCSPSource {
     private final long defaultTtlSeconds;
 
     /**
+     * İş metrikleri için opsiyonel hook — gerçek fetch (cache-miss)
+     * süresi + sonucu ({@code mdss_revocation_fetch_duration_seconds})
+     * buraya yazılır. {@code null} olabilir (metric'siz çalışır).
+     */
+    private final transient io.mersel.dss.verify.api.metrics.VerificationMetrics metrics;
+
+    /**
      * @param delegate          gercek OCSP source (tipik: {@code OnlineOCSPSource})
      * @param maxCacheSize      cache'te tutulacak maksimum entry sayisi
      * @param defaultTtlSeconds varsayilan TTL (nextUpdate yoksa veya cok uzaksa)
      */
     public LoggingCachingOCSPSource(OCSPSource delegate, long maxCacheSize, long defaultTtlSeconds) {
+        this(delegate, maxCacheSize, defaultTtlSeconds, null);
+    }
+
+    /**
+     * Metrics-aware constructor — bkz. {@link #LoggingCachingOCSPSource(OCSPSource, long, long)}.
+     *
+     * @param metrics fetch süresi/sonucu için hook; {@code null} olabilir.
+     */
+    public LoggingCachingOCSPSource(OCSPSource delegate, long maxCacheSize, long defaultTtlSeconds,
+                                    io.mersel.dss.verify.api.metrics.VerificationMetrics metrics) {
         this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
+        this.metrics = metrics;
         if (maxCacheSize <= 0) {
             throw new IllegalArgumentException("maxCacheSize must be > 0, was: " + maxCacheSize);
         }
@@ -105,20 +123,25 @@ public class LoggingCachingOCSPSource implements OCSPSource {
                 safeSubject(certificateToken),
                 safeSubject(issuerCertificateToken));
 
+        long fetchStartNanos = System.nanoTime();
         OCSPToken token;
         try {
             token = delegate.getRevocationToken(certificateToken, issuerCertificateToken);
         } catch (RuntimeException e) {
+            recordFetch("error", fetchStartNanos);
             logger.warn("OCSP fetch failed for subject='{}': {} (not cached, returning null)",
                     safeSubject(certificateToken), e.getMessage());
             return null;
         }
 
         if (token == null) {
+            recordFetch("empty", fetchStartNanos);
             logger.info("OCSP response: subject='{}' — responder returned no token (not cached)",
                     safeSubject(certificateToken));
             return null;
         }
+
+        recordFetch("success", fetchStartNanos);
 
         if (token.getStatus() == CertificateStatus.UNKNOWN) {
             // Responder "bilmiyorum" diyorsa cache'lersek diger isteklerde de bilmedigini varsayariz —
@@ -138,6 +161,21 @@ public class LoggingCachingOCSPSource implements OCSPSource {
                 token.getNextUpdate(),
                 token.getSourceURL());
         return token;
+    }
+
+    /**
+     * Gerçek fetch (cache-miss) süresi + sonucunu metrics hook'una yazar.
+     * Hook null ise no-op; hata asla revocation akışını bozmaz.
+     */
+    private void recordFetch(String outcome, long startNanos) {
+        if (metrics == null) {
+            return;
+        }
+        try {
+            metrics.recordRevocationFetch("ocsp", outcome, System.nanoTime() - startNanos);
+        } catch (RuntimeException ignore) {
+            // metric akışı bozamaz
+        }
     }
 
     /**

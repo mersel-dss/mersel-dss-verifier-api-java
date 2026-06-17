@@ -1,0 +1,474 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["mersel", "dss", "verify-api"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data source",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "current": { "selected": false, "text": "mersel-dss-verify-api", "value": "mersel-dss-verify-api" },
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "definition": "label_values(mdss_verification_duration_seconds_count, application)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Application",
+        "multi": false,
+        "name": "application",
+        "options": [],
+        "query": { "query": "label_values(mdss_verification_duration_seconds_count, application)", "refId": "A" },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Mersel DSS Verify API — Genel Bakış & Teşhis",
+  "uid": "mersel-dss-verify-api",
+  "version": 1,
+  "weekStart": "",
+  "panels": [
+    {
+      "type": "row",
+      "id": 1,
+      "title": "SLO / Özet",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "İstek Hızı (doğrulama)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area", "textMode": "auto" },
+      "targets": [ { "refId": "A", "expr": "sum(rate(mdss_verification_duration_seconds_count{application=\"$application\"}[$__rate_interval]))" } ]
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Başarı (VALID) Oranı",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 0.8 }, { "color": "green", "value": 0.95 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "targets": [ { "refId": "A", "expr": "sum(rate(mdss_verification_duration_seconds_count{application=\"$application\",result=\"valid\"}[$__rate_interval])) / clamp_min(sum(rate(mdss_verification_duration_seconds_count{application=\"$application\"}[$__rate_interval])), 0.0001)" } ]
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "INVALID Oranı",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.1 }, { "color": "red", "value": 0.3 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "targets": [ { "refId": "A", "expr": "sum(rate(mdss_verification_duration_seconds_count{application=\"$application\",result=\"invalid\"}[$__rate_interval])) / clamp_min(sum(rate(mdss_verification_duration_seconds_count{application=\"$application\"}[$__rate_interval])), 0.0001)" } ]
+    },
+    {
+      "type": "stat",
+      "id": 5,
+      "title": "Hata (exception) Hızı",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.1 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "targets": [ { "refId": "A", "expr": "sum(rate(mdss_verification_errors_total{application=\"$application\"}[$__rate_interval]))" } ]
+    },
+    {
+      "type": "stat",
+      "id": 6,
+      "title": "Latency p95",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 2 }, { "color": "red", "value": 5 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "targets": [ { "refId": "A", "expr": "histogram_quantile(0.95, sum(rate(mdss_verification_duration_seconds_bucket{application=\"$application\"}[$__rate_interval])) by (le))" } ]
+    },
+    {
+      "type": "stat",
+      "id": 7,
+      "title": "Latency p99",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 3 }, { "color": "red", "value": 8 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "targets": [ { "refId": "A", "expr": "histogram_quantile(0.99, sum(rate(mdss_verification_duration_seconds_bucket{application=\"$application\"}[$__rate_interval])) by (le))" } ]
+    },
+
+    {
+      "type": "row",
+      "id": 10,
+      "title": "İstek Hacmi & Sonuç Dağılımı",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "Doğrulama hızı — sonuca göre (valid/invalid/error)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 25, "stacking": { "mode": "normal", "group": "A" } }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "refId": "A", "expr": "sum by (result) (rate(mdss_verification_duration_seconds_count{application=\"$application\"}[$__rate_interval]))", "legendFormat": "{{result}}" } ]
+    },
+    {
+      "type": "timeseries",
+      "id": 12,
+      "title": "Doğrulama hızı — imza tipine göre (XAdES/PAdES/CAdES)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 12, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 15 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "refId": "A", "expr": "sum by (type) (rate(mdss_verification_duration_seconds_count{application=\"$application\"}[$__rate_interval]))", "legendFormat": "{{type}}" } ]
+    },
+    {
+      "type": "piechart",
+      "id": 13,
+      "title": "Sonuç dağılımı (pencere toplamı)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 4, "x": 20, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "pieType": "donut", "reduceOptions": { "calcs": ["sum"] } },
+      "targets": [ { "refId": "A", "expr": "sum by (result) (increase(mdss_verification_duration_seconds_count{application=\"$application\"}[$__range]))", "legendFormat": "{{result}}" } ]
+    },
+
+    {
+      "type": "row",
+      "id": 20,
+      "title": "İstek Sonuçlanma Süreleri — \"zaman nerede harcandı?\"",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "Uçtan uca latency (p50 / p95 / p99)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum(rate(mdss_verification_duration_seconds_bucket{application=\"$application\"}[$__rate_interval])) by (le))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum(rate(mdss_verification_duration_seconds_bucket{application=\"$application\"}[$__rate_interval])) by (le))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum(rate(mdss_verification_duration_seconds_bucket{application=\"$application\"}[$__rate_interval])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "type": "heatmap",
+      "id": 22,
+      "title": "Uçtan uca latency dağılımı (heatmap)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "options": { "calculate": false, "cellGap": 1, "color": { "scheme": "Spectral", "mode": "scheme", "steps": 64 }, "yAxis": { "unit": "s" }, "legend": { "show": true }, "tooltip": { "show": true, "yHistogram": true } },
+      "targets": [ { "refId": "A", "expr": "sum(increase(mdss_verification_duration_seconds_bucket{application=\"$application\"}[$__rate_interval])) by (le)", "format": "heatmap", "legendFormat": "{{le}}" } ]
+    },
+    {
+      "type": "timeseries",
+      "id": 23,
+      "title": "Aşama bazlı latency p95 (read → build → dss_validate → parse)",
+      "description": "dss_validate genellikle OCSP/CRL/AIA fetch yüzünden baskındır. Yavaşlık burada görünür.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le, stage) (rate(mdss_verification_stage_duration_seconds_bucket{application=\"$application\"}[$__rate_interval])))", "legendFormat": "{{stage}}" } ]
+    },
+    {
+      "type": "timeseries",
+      "id": 24,
+      "title": "Aşama bazlı ortalama süre (stacked) — toplam latency kırılımı",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 30, "stacking": { "mode": "normal", "group": "A" } }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "refId": "A", "expr": "sum by (stage) (rate(mdss_verification_stage_duration_seconds_sum{application=\"$application\"}[$__rate_interval])) / clamp_min(sum by (stage) (rate(mdss_verification_stage_duration_seconds_count{application=\"$application\"}[$__rate_interval])), 0.0001)", "legendFormat": "{{stage}}" } ]
+    },
+
+    {
+      "type": "row",
+      "id": 30,
+      "title": "Kök Neden — \"neden FAIL?\"",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 }
+    },
+    {
+      "type": "timeseries",
+      "id": 31,
+      "title": "İmza sonuçları — sub_indication'a göre (FAIL/INDETERMINATE)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 20, "stacking": { "mode": "normal", "group": "A" } }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "refId": "A", "expr": "sum by (sub_indication) (rate(mdss_signature_results_total{application=\"$application\", indication!=\"TOTAL_PASSED\", indication!=\"PASSED\"}[$__rate_interval]))", "legendFormat": "{{sub_indication}}" } ]
+    },
+    {
+      "type": "table",
+      "id": 32,
+      "title": "En sık başarısızlık nedenleri (sub_indication)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 12, "y": 32 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "align": "auto" } }, "overrides": [] },
+      "options": { "showHeader": true, "sortBy": [ { "displayName": "Value", "desc": true } ] },
+      "targets": [ { "refId": "A", "expr": "topk(15, sum by (indication, sub_indication) (rate(mdss_signature_results_total{application=\"$application\", indication!=\"TOTAL_PASSED\", indication!=\"PASSED\"}[$__range])))", "format": "table", "instant": true } ],
+      "transformations": [ { "id": "organize", "options": { "excludeByName": { "Time": true, "application": true }, "renameByName": { "indication": "Indication", "sub_indication": "Sub-indication", "Value": "rate/s" } } } ]
+    },
+    {
+      "type": "piechart",
+      "id": 33,
+      "title": "Indication dağılımı",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 4, "x": 20, "y": 32 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "pieType": "donut", "reduceOptions": { "calcs": ["sum"] } },
+      "targets": [ { "refId": "A", "expr": "sum by (indication) (increase(mdss_signature_results_total{application=\"$application\"}[$__range]))", "legendFormat": "{{indication}}" } ]
+    },
+    {
+      "type": "timeseries",
+      "id": 34,
+      "title": "MDSS Tolerance Gate — applied vs rejected",
+      "description": "KamuSM/GİB legacy XAdES Type URI toleransı. rejected reason kıran için sorgu panelin altında.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 15 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(mdss_tolerance_applied_total[$__rate_interval]))", "legendFormat": "applied" },
+        { "refId": "B", "expr": "sum by (reason) (rate(mdss_tolerance_rejected_total[$__rate_interval]))", "legendFormat": "rejected: {{reason}}" }
+      ]
+    },
+
+    {
+      "type": "row",
+      "id": 40,
+      "title": "Bağımlılıklar (KamuSM: OCSP / CRL / AIA / Trust Store)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 48 }
+    },
+    {
+      "type": "timeseries",
+      "id": 41,
+      "title": "Revocation fetch hızı — tip + sonuç",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 49 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 15 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "refId": "A", "expr": "sum by (type, outcome) (rate(mdss_revocation_fetch_duration_seconds_count{application=\"$application\"}[$__rate_interval]))", "legendFormat": "{{type}} / {{outcome}}" } ]
+    },
+    {
+      "type": "timeseries",
+      "id": 42,
+      "title": "Revocation fetch latency p95 — tipe göre",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 49 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le, type) (rate(mdss_revocation_fetch_duration_seconds_bucket{application=\"$application\"}[$__rate_interval])))", "legendFormat": "{{type}} p95" } ]
+    },
+    {
+      "type": "timeseries",
+      "id": 43,
+      "title": "Revocation retry olayları (retried / recovered / exhausted)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 57 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 15 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "refId": "A", "expr": "sum by (type, event) (rate(mdss_revocation_retry_total{application=\"$application\"}[$__rate_interval]))", "legendFormat": "{{type}} / {{event}}" } ]
+    },
+    {
+      "type": "timeseries",
+      "id": 44,
+      "title": "AIA (ara CA) fetch — hız (sonuç) ve p95",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 57 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 }, "color": { "mode": "palette-classic" } }, "overrides": [ { "matcher": { "id": "byName", "options": "p95" }, "properties": [ { "id": "unit", "value": "s" }, { "id": "custom.axisPlacement", "value": "right" } ] } ] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (outcome) (rate(mdss_aia_fetch_duration_seconds_count{application=\"$application\"}[$__rate_interval]))", "legendFormat": "{{outcome}}" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(mdss_aia_fetch_duration_seconds_bucket{application=\"$application\"}[$__rate_interval])))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 45,
+      "title": "Cache hit-rate (OCSP / CRL / AIA)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 65 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "drawStyle": "line", "fillOpacity": 10 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "refId": "A", "expr": "sum by (cache) (rate(cache_gets_total{application=\"$application\", result=\"hit\"}[$__rate_interval])) / clamp_min(sum by (cache) (rate(cache_gets_total{application=\"$application\"}[$__rate_interval])), 0.0001)", "legendFormat": "{{cache}}" } ]
+    },
+    {
+      "type": "stat",
+      "id": 46,
+      "title": "Güven deposu kök sertifika sayısı",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 65 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "targets": [ { "refId": "A", "expr": "max(mdss_trusted_root_certificates{application=\"$application\"})" } ]
+    },
+    {
+      "type": "stat",
+      "id": 47,
+      "title": "Son kök sertifika refresh'inden bu yana",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 65 },
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 90000 }, { "color": "red", "value": 93600 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "targets": [ { "refId": "A", "expr": "time() - max(mdss_trusted_root_last_success_timestamp_seconds{application=\"$application\"})" } ]
+    },
+    {
+      "type": "timeseries",
+      "id": 48,
+      "title": "Kök sertifika refresh sonucu",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 69 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "bars", "fillOpacity": 50 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "expr": "sum by (result) (rate(mdss_trusted_root_refresh_total{application=\"$application\"}[$__rate_interval]))", "legendFormat": "{{result}}" } ]
+    },
+
+    {
+      "type": "row",
+      "id": 50,
+      "title": "HTTP Katmanı",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 73 }
+    },
+    {
+      "type": "timeseries",
+      "id": 51,
+      "title": "HTTP istek hızı — uri + status",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 74 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "refId": "A", "expr": "sum by (uri, status) (rate(http_server_requests_seconds_count{application=\"$application\", uri=~\"/api/v1/verify.*\"}[$__rate_interval]))", "legendFormat": "{{uri}} [{{status}}]" } ]
+    },
+    {
+      "type": "timeseries",
+      "id": 52,
+      "title": "HTTP latency p95 — uri'ye göre",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 74 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le, uri) (rate(http_server_requests_seconds_bucket{application=\"$application\", uri=~\"/api/v1/verify.*\"}[$__rate_interval])))", "legendFormat": "{{uri}}" } ]
+    },
+    {
+      "type": "timeseries",
+      "id": 53,
+      "title": "HTTP 5xx hata hızı",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 82 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 20 }, "color": { "mode": "fixed", "fixedColor": "red" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "refId": "A", "expr": "sum by (uri) (rate(http_server_requests_seconds_count{application=\"$application\", status=~\"5..\"}[$__rate_interval]))", "legendFormat": "{{uri}}" } ]
+    },
+    {
+      "type": "timeseries",
+      "id": 54,
+      "title": "INVALID imza bildirimi — kanal + olay",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 82 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "refId": "A", "expr": "sum by (channel, event) (rate(mdss_notification_dispatch_total{application=\"$application\"}[$__rate_interval]))", "legendFormat": "{{channel}} / {{event}}" } ]
+    },
+
+    {
+      "type": "row",
+      "id": 60,
+      "title": "JVM / Runtime",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 88 },
+      "panels": [
+        {
+          "type": "timeseries",
+          "id": 61,
+          "title": "JVM Heap (used / max)",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 89 },
+          "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 10 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "refId": "A", "expr": "sum(jvm_memory_used_bytes{application=\"$application\", area=\"heap\"})", "legendFormat": "heap used" },
+            { "refId": "B", "expr": "sum(jvm_memory_max_bytes{application=\"$application\", area=\"heap\"})", "legendFormat": "heap max" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 62,
+          "title": "GC pause (rate)",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 89 },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi" } },
+          "targets": [ { "refId": "A", "expr": "sum by (action) (rate(jvm_gc_pause_seconds_sum{application=\"$application\"}[$__rate_interval]))", "legendFormat": "{{action}}" } ]
+        },
+        {
+          "type": "timeseries",
+          "id": 63,
+          "title": "CPU kullanımı (process / system)",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 97 },
+          "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "drawStyle": "line", "fillOpacity": 10 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "refId": "A", "expr": "avg(process_cpu_usage{application=\"$application\"})", "legendFormat": "process" },
+            { "refId": "B", "expr": "avg(system_cpu_usage{application=\"$application\"})", "legendFormat": "system" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 64,
+          "title": "Thread'ler",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 97 },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 }, "color": { "mode": "palette-classic" } }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "refId": "A", "expr": "avg(jvm_threads_live_threads{application=\"$application\"})", "legendFormat": "live" },
+            { "refId": "B", "expr": "avg(jvm_threads_daemon_threads{application=\"$application\"})", "legendFormat": "daemon" }
+          ]
+        }
+      ]
+    }
+  ]
+}

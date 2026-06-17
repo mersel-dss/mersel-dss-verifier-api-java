@@ -83,10 +83,20 @@ public class RevocationServicesConfiguration {
      */
     private final ObjectProvider<MeterRegistry> meterRegistryProvider;
 
+    /**
+     * Domain iş metrikleri — revocation fetch süresi/sonucu ve retry
+     * olayları için. {@link ObjectProvider} ile alıyoruz ki test
+     * slice'larında bean yoksa wiring bozulmasın; {@code null} ise
+     * source'lara metric'siz (graceful) geçilir.
+     */
+    private final ObjectProvider<io.mersel.dss.verify.api.metrics.VerificationMetrics> verificationMetricsProvider;
+
     public RevocationServicesConfiguration(VerificationConfiguration config,
-                                           ObjectProvider<MeterRegistry> meterRegistryProvider) {
+                                           ObjectProvider<MeterRegistry> meterRegistryProvider,
+                                           ObjectProvider<io.mersel.dss.verify.api.metrics.VerificationMetrics> verificationMetricsProvider) {
         this.config = config;
         this.meterRegistryProvider = meterRegistryProvider;
+        this.verificationMetricsProvider = verificationMetricsProvider;
     }
 
     /**
@@ -108,15 +118,19 @@ public class RevocationServicesConfiguration {
         OnlineOCSPSource online = new OnlineOCSPSource();
         online.setDataLoader(dataLoader);
 
+        io.mersel.dss.verify.api.metrics.VerificationMetrics metrics =
+                verificationMetricsProvider != null ? verificationMetricsProvider.getIfAvailable() : null;
+
         RetryPolicy retryPolicy = buildRetryPolicy();
         OCSPSource retryingOrPlain = retryPolicy.getMaxAttempts() > 1
-                ? new RetryingOCSPSource(online, retryPolicy)
+                ? new RetryingOCSPSource(online, retryPolicy, metrics)
                 : online;
 
         LoggingCachingOCSPSource source = new LoggingCachingOCSPSource(
                 retryingOrPlain,
                 config.getRevocationCacheMaxSize(),
-                config.getRevocationCacheTtlSeconds());
+                config.getRevocationCacheTtlSeconds(),
+                metrics);
 
         bindCacheMetrics(OCSP_CACHE_METRIC_NAME, source.caffeineCache());
 
@@ -142,15 +156,19 @@ public class RevocationServicesConfiguration {
         OnlineCRLSource online = new OnlineCRLSource();
         online.setDataLoader(dataLoader);
 
+        io.mersel.dss.verify.api.metrics.VerificationMetrics metrics =
+                verificationMetricsProvider != null ? verificationMetricsProvider.getIfAvailable() : null;
+
         RetryPolicy retryPolicy = buildRetryPolicy();
         CRLSource retryingOrPlain = retryPolicy.getMaxAttempts() > 1
-                ? new RetryingCRLSource(online, retryPolicy)
+                ? new RetryingCRLSource(online, retryPolicy, metrics)
                 : online;
 
         LoggingCachingCRLSource source = new LoggingCachingCRLSource(
                 retryingOrPlain,
-                config.getRevocationCacheMaxSize(),
-                config.getRevocationCacheTtlSeconds());
+                config.getCrlCacheMaxSize(),
+                config.getRevocationCacheTtlSeconds(),
+                metrics);
 
         bindCacheMetrics(CRL_CACHE_METRIC_NAME, source.caffeineCache());
 
@@ -189,10 +207,14 @@ public class RevocationServicesConfiguration {
         CommonsDataLoader rawLoader = new CommonsDataLoader();
         applyTimeouts(rawLoader);
 
+        io.mersel.dss.verify.api.metrics.VerificationMetrics metrics =
+                verificationMetricsProvider != null ? verificationMetricsProvider.getIfAvailable() : null;
+
         NormalizingCachingAiaDataLoader normalizingLoader = new NormalizingCachingAiaDataLoader(
                 rawLoader,
                 config.getAiaCacheMaxSize(),
-                config.getAiaCacheTtlSeconds());
+                config.getAiaCacheTtlSeconds(),
+                metrics);
 
         // Caffeine cache'i Micrometer'a bağla — observability paritesi
         // OCSP/CRL ile aynı standartta. Bind başarısız olsa bile AIA
@@ -271,16 +293,42 @@ public class RevocationServicesConfiguration {
     }
 
     /**
-     * HTTP timeout'larini uygular. Hardening — KamuSM uclari ara sira yavas
-     * cevaplar; doğrulamanin TSA fetch / OCSP fetch yuzunden 30+ saniyeye
-     * uzamasini onlemek icin agresif timeout'larla calisiyoruz.
+     * HTTP timeout'larini ve <strong>connection pool</strong> ayarlarini
+     * uygular.
+     *
+     * <p><strong>Üretim olayı düzeltmesi</strong>: DSS 6.3
+     * {@code CommonsDataLoader} default'lari bu servis icin tehlikeliydi —
+     * {@code maxPerRoute=2}, {@code maxTotal=20}, {@code connectionRequest
+     * timeout=60000ms}. Tüm OCSP istekleri tek KamuSM host'una (tek route)
+     * gittiginden, pod basina yalnizca 2 eszamanli fetch yapilabiliyor;
+     * havuz dolunca 3.+ Tomcat thread'i 60sn bloke kaliyor ve saatler
+     * icinde tum thread havuzu kilitlenip HttpTimeout uretiyordu.</p>
+     *
+     * <p>Burada dort sey override edilir:</p>
+     * <ul>
+     *   <li><b>connection timeout</b> — TCP connect (default 10s)</li>
+     *   <li><b>socket timeout</b> — read between packets (default 10s)</li>
+     *   <li><b>connection-request timeout</b> — havuzdan lease (default 3s;
+     *       60sn yerine HIZLI fail → thread serbest kalir)</li>
+     *   <li><b>pool boyutu</b> — maxPerRoute (default 50) + maxTotal
+     *       (default 200) → gercek paralellik</li>
+     * </ul>
      */
     private void applyTimeouts(CommonsDataLoader dataLoader) {
         int connTimeoutMs = config.getRevocationHttpConnectionTimeoutMs();
         int socketTimeoutMs = config.getRevocationHttpSocketTimeoutMs();
+        int connRequestTimeoutMs = config.getRevocationHttpConnectionRequestTimeoutMs();
+        int maxPerRoute = config.getRevocationHttpMaxConnectionsPerRoute();
+        int maxTotal = config.getRevocationHttpMaxConnectionsTotal();
+
         dataLoader.setTimeoutConnection(connTimeoutMs);
         dataLoader.setTimeoutSocket(socketTimeoutMs);
-        logger.debug("DataLoader timeouts applied: connection={}ms, socket={}ms",
-                connTimeoutMs, socketTimeoutMs);
+        dataLoader.setTimeoutConnectionRequest(connRequestTimeoutMs);
+        dataLoader.setConnectionsMaxPerRoute(maxPerRoute);
+        dataLoader.setConnectionsMaxTotal(maxTotal);
+
+        logger.info("DataLoader HTTP tuned: connect={}ms, socket={}ms, "
+                        + "connectionRequest={}ms, maxPerRoute={}, maxTotal={}",
+                connTimeoutMs, socketTimeoutMs, connRequestTimeoutMs, maxPerRoute, maxTotal);
     }
 }

@@ -43,9 +43,28 @@ public final class RetryExecutor {
     private final RetryPolicy policy;
     private final Sleeper sleeper;
 
+    /** Opsiyonel iş metriği hook'u (retried/recovered/exhausted); null olabilir. */
+    private final io.mersel.dss.verify.api.metrics.VerificationMetrics metrics;
+
+    /** Metric etiketi: {@code ocsp} veya {@code crl}; metrics null ise kullanılmaz. */
+    private final String kind;
+
     public RetryExecutor(RetryPolicy policy, Sleeper sleeper) {
+        this(policy, sleeper, null, null);
+    }
+
+    /**
+     * Metrics-aware constructor.
+     *
+     * @param metrics retry olay sayaçları için hook; {@code null} olabilir.
+     * @param kind    {@code ocsp} / {@code crl} (metric etiketi).
+     */
+    public RetryExecutor(RetryPolicy policy, Sleeper sleeper,
+                         io.mersel.dss.verify.api.metrics.VerificationMetrics metrics, String kind) {
         this.policy = Objects.requireNonNull(policy, "policy must not be null");
         this.sleeper = Objects.requireNonNull(sleeper, "sleeper must not be null");
+        this.metrics = metrics;
+        this.kind = kind;
     }
 
     public RetryPolicy getPolicy() {
@@ -74,6 +93,7 @@ public final class RetryExecutor {
                 if (attempt > 1) {
                     logger.info("Retry succeeded for '{}' on attempt {}/{}",
                             operation, attempt, maxAttempts);
+                    recordRetryEvent("recovered");
                 }
                 return result;
             } catch (RuntimeException e) {
@@ -81,10 +101,12 @@ public final class RetryExecutor {
                 if (attempt >= maxAttempts) {
                     logger.warn("Retry exhausted for '{}' after {} attempt(s); last error: {}",
                             operation, maxAttempts, e.getMessage());
+                    recordRetryEvent("exhausted");
                     break;
                 }
                 long rawBackoff = policy.computeRawBackoffMs(attempt - 1);
                 long sleepMs = applyJitter(rawBackoff, policy.getJitterRatio());
+                recordRetryEvent("retried");
                 logger.info("Retrying '{}' after {}ms (next attempt {}/{}); transient error: {}",
                         operation, sleepMs, attempt + 1, maxAttempts, e.getMessage());
                 try {
@@ -101,6 +123,17 @@ public final class RetryExecutor {
         // Tum attempt'lar bitti; son exception'i caller'a uzat.
         // lastException null olamaz (loop body'sinde her zaman atanir).
         throw lastException;
+    }
+
+    private void recordRetryEvent(String event) {
+        if (metrics == null || kind == null) {
+            return;
+        }
+        try {
+            metrics.recordRevocationRetry(kind, event);
+        } catch (RuntimeException ignore) {
+            // metric akışı bozamaz
+        }
     }
 
     /**

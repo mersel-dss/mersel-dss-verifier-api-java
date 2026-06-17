@@ -7,6 +7,114 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+### Fixed
+- **`HttpTimeout` arızası giderildi — DSS HTTP connection pool yeniden boyutlandırıldı.**
+  10 pod'lu üretimde, birkaç saat çalıştıktan sonra verifier'a gelen isteklerde
+  `HttpTimeout` görülüyordu. Kök neden, DSS 6.3 `CommonsDataLoader`'ın bu yük
+  profili için tehlikeli default'larıydı: `connectionsMaxPerRoute=2`,
+  `connectionsMaxTotal=20`, `timeoutConnectionRequest=60000ms`. Tüm OCSP/CRL
+  istekleri **tek** KamuSM host'una (tek route) gittiğinden pod başına yalnızca
+  **2 eşzamanlı** revocation fetch yapılabiliyor; havuz dolunca sonraki Tomcat
+  thread'leri bağlantı için **60 saniye** bloke kalıyordu. Bu thread'ler saatler
+  içinde birikip tüm Tomcat worker havuzunu kilitliyor ve istemciler timeout
+  alıyordu (kademeli brownout, self-heal yok).
+
+  [`RevocationServicesConfiguration.applyTimeouts`](src/main/java/io/mersel/dss/verify/api/config/RevocationServicesConfiguration.java)
+  artık connect + socket timeout'a ek olarak şunları da override ediyor:
+  `connection-request-timeout=3s` (60s yerine — havuz açlığında 60sn asılmak
+  yerine hızlı fail eder, thread serbest kalır ve retry/fallback devreye girer),
+  `maxPerRoute=50`, `maxTotal=200`. Hepsi `REVOCATION_HTTP_*` env var'larıyla
+  ayarlanabilir. **Revocation denetim mantığı değişmedi**; yalnızca tıkanmaya yol
+  açan HTTP altyapısı sağlamlaştırıldı — veri gerçekten alınamadığında strict
+  policy yine `INDETERMINATE/NO_REVOCATION_DATA` döndürür.
+
+- **CRL cache için ayrı (daha küçük) kapasite** —
+  CRL token'ları MB seviyesine ulaşabildiğinden OCSP ile aynı 10.000'lik cache
+  cap'ini paylaşmaları heap amplifikasyonu riski taşıyordu. Yeni
+  `verification.revocation.crl.cache.max-size` (default 256,
+  `REVOCATION_CRL_CACHE_MAX_SIZE`) CRL cache'ini ayrı sınırlar. CRL cache
+  anahtarı **bilinçli olarak** sertifika bazında bırakıldı; `CRLToken`
+  sertifikaya özgü iptal durumu taşıdığından issuer bazlı paylaşım yanlış sonuç
+  üretirdi.
+
+### Added
+- **Kapsamlı domain (iş) metrikleri — `VerificationMetrics`.**
+  Yeni [`VerificationMetrics`](src/main/java/io/mersel/dss/verify/api/metrics/VerificationMetrics.java)
+  bileşeni, doğrulama akışının her aşamasını ölçen null-safe bir Micrometer
+  sarmalayıcısıdır (MeterRegistry yoksa sessizce devre dışı kalır). Eklenen
+  başlıca metrikler:
+  - `mdss_verification_duration_seconds` — uçtan uca istek sonuçlanma süresi
+    (`type`/`level`/`result` etiketli, percentile histogram + SLO bucket'ları)
+  - `mdss_verification_stage_duration_seconds` — aşama bazlı kırılım
+    (`read_input → build_validator → dss_validate → parse_result`); "doğrulama
+    neden yavaş?" sorusunun cevabı
+  - `mdss_verification_errors_total` — exception (parse/IO/altyapı) sayacı
+  - `mdss_signature_results_total` — imza başına `indication`/`sub_indication`
+    dağılımı (kök neden analizi)
+  - `mdss_timestamp_duration_seconds` — RFC 3161 zaman damgası doğrulama süresi
+  - `mdss_revocation_fetch_duration_seconds` — OCSP/CRL fetch hız+latency
+    (`type`/`outcome` etiketli)
+  - `mdss_revocation_retry_total` — retry olayları (`retried`/`recovered`/`exhausted`)
+  - `mdss_aia_fetch_duration_seconds` — AIA (ara CA) fetch süresi
+  - `mdss_trusted_root_refresh_total`, `mdss_trusted_root_certificates`,
+    `mdss_trusted_root_last_success_timestamp_seconds` — güven deposu sağlığı
+  - `mdss_notification_dispatch_total` — bildirim kanalı (webhook/slack) sonuçları
+
+  İlgili akışlar enstrümante edildi:
+  [`AdvancedSignatureVerificationService`](src/main/java/io/mersel/dss/verify/api/services/verification/AdvancedSignatureVerificationService.java),
+  [`AdvancedTimestampVerificationService`](src/main/java/io/mersel/dss/verify/api/services/timestamp/AdvancedTimestampVerificationService.java),
+  [`LoggingCachingOCSPSource`](src/main/java/io/mersel/dss/verify/api/services/revocation/LoggingCachingOCSPSource.java) /
+  [`LoggingCachingCRLSource`](src/main/java/io/mersel/dss/verify/api/services/revocation/LoggingCachingCRLSource.java),
+  [`RetryExecutor`](src/main/java/io/mersel/dss/verify/api/services/revocation/RetryExecutor.java),
+  [`NormalizingCachingAiaDataLoader`](src/main/java/io/mersel/dss/verify/api/services/aia/NormalizingCachingAiaDataLoader.java),
+  [`KamusmRootCertificateService`](src/main/java/io/mersel/dss/verify/api/services/certificate/KamusmRootCertificateService.java),
+  [`InvalidSignatureNotifier`](src/main/java/io/mersel/dss/verify/api/services/notification/InvalidSignatureNotifier.java).
+
+- **Kubernetes readiness HealthIndicator'ları (kademeli çökmeye karşı self-heal).**
+  Yalnız `readiness` grubuna eklenen iki gösterge (liveness'a DEĞİL — geçici
+  problem pod'u öldürmemeli, yalnız trafikten çekmeli):
+  - [`ThreadPoolSaturationHealthIndicator`](src/main/java/io/mersel/dss/verify/api/health/ThreadPoolSaturationHealthIndicator.java)
+    (`verifierThreadPool`) — `tomcat.threads.busy/max` eşiği (default %95,
+    `verification.health.thread-pool-saturation-threshold`) aşılınca
+    `OUT_OF_SERVICE` döner; doygun pod load balancer'dan düşer, yük sağlıklı
+    pod'lara kayar, yük azalınca pod kendiliğinden tekrar hazır olur.
+  - [`TrustedRootHealthIndicator`](src/main/java/io/mersel/dss/verify/api/health/TrustedRootHealthIndicator.java)
+    (`trustedRootStore`) — güven deposu boşsa pod hazır değil (güvenlik ağı).
+  Probe'lar `management.endpoint.health.probes.enabled=true` ile aktif;
+  `/actuator/health/readiness` ve `/actuator/health/liveness` kullanılabilir.
+
+- **Mersel DSS Verify API Grafana dashboard'u (otomatik provision).**
+  Yeni [`mersel-dss-verify-api.json`](devops/monitoring/grafana/dashboards/mersel-dss-verify-api.json):
+  SLO/özet, istek hacmi & sonuç dağılımı, latency (p50/p95/p99 + heatmap +
+  aşama kırılımı), kök neden (`sub_indication`), bağımlılıklar (OCSP/CRL/AIA
+  fetch + retry + cache hit-rate + güven deposu) ve JVM/runtime bölümleri.
+  Docker Compose'da `Verify API` klasörü altında elle import gerektirmeden gelir.
+
+- **Yeni Prometheus alert'leri** —
+  [`alerts.yml`](devops/monitoring/prometheus/alerts.yml): `HighVerificationFailureRate`,
+  `HighVerificationErrorRate`, `HighVerificationLatencyP95`,
+  `HighRevocationFetchErrorRate`, `HighTomcatThreadSaturation`,
+  `TrustedRootRefreshStale`, `TrustedRootStoreEmpty`.
+
+### Changed
+- **Prometheus `application` etiketi tutarlılığı** —
+  [`prometheus.yml`](devops/monitoring/prometheus/prometheus.yml)'deki statik
+  `application: 'verify-api'` scrape etiketi kaldırıldı; uygulamanın kendi
+  `application="mersel-dss-verify-api"` (Micrometer/`spring.application.name`)
+  etiketi tek doğruluk kaynağıdır. Statik etiket `honor_labels=false` altında
+  uygulamanın etiketini `exported_application`'a gölgeliyordu. Ayrıca JSON dönen
+  `/actuator/health`'ı Prometheus text formatı sanıp sürekli parse hatası veren
+  `verify-api-health` scrape job'ı kaldırıldı.
+- **Micrometer histogram/SLO konfigürasyonu** —
+  [`application.properties`](src/main/resources/application.properties)'e HTTP ve
+  domain timer'ları için percentile-histogram + SLO bucket tanımları eklendi;
+  Grafana p95/p99, heatmap ve Apdex panelleri ile alert eşiklerini besler.
+- **Monitoring dokümantasyonu güncellendi** —
+  [`devops/monitoring/README.md`](devops/monitoring/README.md) ve
+  [dashboard README](devops/monitoring/grafana/dashboards/README.md): gerçek
+  metrik isimleriyle PromQL örnekleri, güncel alert tablosu, connection pool
+  tuning ve Kubernetes probe rehberi.
+
 ## [1.0.3] - 2026-06-09
 
 ### Fixed

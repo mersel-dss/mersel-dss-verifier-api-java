@@ -23,19 +23,23 @@ scrape_configs:
       - targets: ['localhost:9090']
 
   # Verify API metrics
+  # NOT: 'application' etiketini BİLİNÇLİ olarak burada set ETMİYORUZ.
+  # Uygulama metriklerine Micrometer zaten
+  # application="mersel-dss-verify-api" (spring.application.name) ekliyor.
+  # Statik bir 'application: verify-api' etiketi eklemek çakışmaya ve
+  # exported_application gölge etiketine yol açıyordu; tek doğruluk
+  # kaynağı uygulamanın kendisidir. Sadece çakışmayan 'service' eklenir.
   - job_name: 'verify-api'
     metrics_path: '/actuator/prometheus'
     static_configs:
       - targets: ['verify-api:8086']
         labels:
-          application: 'verify-api'
           service: 'verification'
     scrape_interval: 10s
     scrape_timeout: 5s
 
-  # Verify API health
-  - job_name: 'verify-api-health'
-    metrics_path: '/actuator/health'
-    static_configs:
-      - targets: ['verify-api:8086']
-    scrape_interval: 30s
+  # NOT: Eski 'verify-api-health' job'ı kaldırıldı. /actuator/health JSON
+  # döner (Prometheus text exposition değil); bu yüzden o job sürekli
+  # parse hatası veriyordu. Servis ayakta mı sorusu zaten
+  # up{job="verify-api"} ile ölçülüyor (ServiceDown alert'i bunu kullanır).
+  # Bağımlılık/health detayı için blackbox_exporter eklenebilir.

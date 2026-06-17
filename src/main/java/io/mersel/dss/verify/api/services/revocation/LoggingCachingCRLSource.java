@@ -49,8 +49,17 @@ public class LoggingCachingCRLSource implements CRLSource {
     private final transient CRLSource delegate;
     private final transient Cache<String, CRLToken> cache;
 
+    /** İş metrikleri için opsiyonel hook; {@code null} olabilir. */
+    private final transient io.mersel.dss.verify.api.metrics.VerificationMetrics metrics;
+
     public LoggingCachingCRLSource(CRLSource delegate, long maxCacheSize, long defaultTtlSeconds) {
+        this(delegate, maxCacheSize, defaultTtlSeconds, null);
+    }
+
+    public LoggingCachingCRLSource(CRLSource delegate, long maxCacheSize, long defaultTtlSeconds,
+                                   io.mersel.dss.verify.api.metrics.VerificationMetrics metrics) {
         this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
+        this.metrics = metrics;
         if (maxCacheSize <= 0) {
             throw new IllegalArgumentException("maxCacheSize must be > 0, was: " + maxCacheSize);
         }
@@ -87,21 +96,25 @@ public class LoggingCachingCRLSource implements CRLSource {
                 safeSubject(certificateToken),
                 safeSubject(issuerCertificateToken));
 
+        long fetchStartNanos = System.nanoTime();
         CRLToken token;
         try {
             token = delegate.getRevocationToken(certificateToken, issuerCertificateToken);
         } catch (RuntimeException e) {
+            recordFetch("error", fetchStartNanos);
             logger.warn("CRL fetch failed for subject='{}': {} (not cached, returning null)",
                     safeSubject(certificateToken), e.getMessage());
             return null;
         }
 
         if (token == null) {
+            recordFetch("empty", fetchStartNanos);
             logger.info("CRL response: subject='{}' — distribution point returned no token (not cached)",
                     safeSubject(certificateToken));
             return null;
         }
 
+        recordFetch("success", fetchStartNanos);
         cache.put(key, token);
         logger.info("CRL response: subject='{}', status={}, thisUpdate={}, nextUpdate={}, sourceUrl={} (cached)",
                 safeSubject(certificateToken),
@@ -110,6 +123,17 @@ public class LoggingCachingCRLSource implements CRLSource {
                 token.getNextUpdate(),
                 token.getSourceURL());
         return token;
+    }
+
+    private void recordFetch(String outcome, long startNanos) {
+        if (metrics == null) {
+            return;
+        }
+        try {
+            metrics.recordRevocationFetch("crl", outcome, System.nanoTime() - startNanos);
+        } catch (RuntimeException ignore) {
+            // metric akışı bozamaz
+        }
     }
 
     public com.github.benmanes.caffeine.cache.stats.CacheStats stats() {

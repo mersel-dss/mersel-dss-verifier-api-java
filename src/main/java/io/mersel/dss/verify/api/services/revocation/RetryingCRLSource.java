@@ -34,6 +34,16 @@ public class RetryingCRLSource implements CRLSource {
         this.retryExecutor = new RetryExecutor(policy, sleeper);
     }
 
+    /**
+     * Metrics-aware production constructor — retry olaylarini
+     * {@code mdss_revocation_retry_total{type="crl"}} sayacina yazar.
+     */
+    public RetryingCRLSource(CRLSource delegate, RetryPolicy policy,
+                             io.mersel.dss.verify.api.metrics.VerificationMetrics metrics) {
+        this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
+        this.retryExecutor = new RetryExecutor(policy, Sleeper.threadSleep(), metrics, "crl");
+    }
+
     @Override
     public CRLToken getRevocationToken(CertificateToken certificateToken,
                                        CertificateToken issuerCertificateToken) {

@@ -88,6 +88,56 @@ public class VerificationConfiguration {
     @Value("${verification.revocation.http.socket-timeout-ms:10000}")
     private int revocationHttpSocketTimeoutMs;
 
+    /**
+     * HTTP <strong>connection-request</strong> timeout (ms) — havuzdan bir
+     * bağlantı <em>kiralama</em> (lease) için beklenecek azami süre.
+     *
+     * <p><strong>Üretim olayı kök nedeni</strong>: DSS 6.3
+     * {@code CommonsDataLoader} default'unda bu değer <b>60000ms</b>'dir ve
+     * uygulama eskiden yalnızca connect + socket timeout'u override ediyordu.
+     * Tüm OCSP istekleri tek bir KamuSM host'una (tek route) gittiği ve
+     * default {@code maxPerRoute=2} olduğu için, havuz dolduğunda 3.+ Tomcat
+     * thread'i bağlantı için 60sn bloke kalıyor; bu da saatler içinde tüm
+     * thread havuzunu kilitleyip HttpTimeout'a yol açıyordu. Kısa tutarak
+     * (default 3sn) havuz açlığı 60sn asılmak yerine HIZLI başarısız olur —
+     * thread serbest kalır, retry/fallback devreye girer.</p>
+     */
+    @Value("${verification.revocation.http.connection-request-timeout-ms:3000}")
+    private int revocationHttpConnectionRequestTimeoutMs;
+
+    /**
+     * HTTP connection pool — <strong>route (host) başına</strong> maksimum
+     * eşzamanlı bağlantı. DSS default'u yalnızca <b>2</b>'dir; KamuSM OCSP/CRL
+     * tek host olduğu için bu, pod başına 2 eşzamanlı revocation fetch demek —
+     * gerçek bir darboğaz. Default 50 ile her pod KamuSM'i bombalamadan makul
+     * paralellik kazanır (10 pod × 50 = 500 üst sınır; KamuSM kapasitesine
+     * göre ayarlayın).
+     */
+    @Value("${verification.revocation.http.max-connections-per-route:50}")
+    private int revocationHttpMaxConnectionsPerRoute;
+
+    /**
+     * HTTP connection pool — bir DataLoader içindeki <strong>toplam</strong>
+     * maksimum bağlantı. DSS default'u 20. OCSP, CRL ve AIA ayrı DataLoader
+     * (ayrı pool) kullandığı için bu üst sınır her biri için bağımsızdır.
+     * Default 200; {@code maxPerRoute} ile birlikte route-başı limitin
+     * toplam limiti aşmadığından emin olun.
+     */
+    @Value("${verification.revocation.http.max-connections-total:200}")
+    private int revocationHttpMaxConnectionsTotal;
+
+    /**
+     * CRL cache'i için <strong>ayrı</strong> maksimum giriş sayısı.
+     *
+     * <p>CRL token'ları MB seviyesine ulaşabildiği için OCSP ile aynı
+     * 10K'lık cap'i paylaşmaları bellek amplifikasyonu riski taşır. Cache
+     * artık CRL <em>dağıtım noktası</em> (issuer) bazında anahtarlandığı
+     * için (sertifika-başına değil) KamuSM ekosisteminde aktif CRL sayısı
+     * çok düşüktür (≤ birkaç düzine); 256 fazlasıyla yeter ve heap'i korur.</p>
+     */
+    @Value("${verification.revocation.crl.cache.max-size:256}")
+    private long crlCacheMaxSize;
+
     // --- Revocation Retry (OCSP/CRL transient hata toleransi) ---
     // Strict policy revocation verisi ZORUNLU oldugundan tek bir transient
     // hata (KamuSM 503, connection reset, TLS handshake glitch) gecerli bir
@@ -361,6 +411,38 @@ public class VerificationConfiguration {
 
     public void setRevocationHttpSocketTimeoutMs(int revocationHttpSocketTimeoutMs) {
         this.revocationHttpSocketTimeoutMs = revocationHttpSocketTimeoutMs;
+    }
+
+    public int getRevocationHttpConnectionRequestTimeoutMs() {
+        return revocationHttpConnectionRequestTimeoutMs;
+    }
+
+    public void setRevocationHttpConnectionRequestTimeoutMs(int revocationHttpConnectionRequestTimeoutMs) {
+        this.revocationHttpConnectionRequestTimeoutMs = revocationHttpConnectionRequestTimeoutMs;
+    }
+
+    public int getRevocationHttpMaxConnectionsPerRoute() {
+        return revocationHttpMaxConnectionsPerRoute;
+    }
+
+    public void setRevocationHttpMaxConnectionsPerRoute(int revocationHttpMaxConnectionsPerRoute) {
+        this.revocationHttpMaxConnectionsPerRoute = revocationHttpMaxConnectionsPerRoute;
+    }
+
+    public int getRevocationHttpMaxConnectionsTotal() {
+        return revocationHttpMaxConnectionsTotal;
+    }
+
+    public void setRevocationHttpMaxConnectionsTotal(int revocationHttpMaxConnectionsTotal) {
+        this.revocationHttpMaxConnectionsTotal = revocationHttpMaxConnectionsTotal;
+    }
+
+    public long getCrlCacheMaxSize() {
+        return crlCacheMaxSize;
+    }
+
+    public void setCrlCacheMaxSize(long crlCacheMaxSize) {
+        this.crlCacheMaxSize = crlCacheMaxSize;
     }
 
     public boolean isRevocationRetryEnabled() {

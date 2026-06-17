@@ -31,6 +31,15 @@ public class KamusmRootCertificateService {
     
     private final TrustedRootCertificateResolver resolver;
 
+    /**
+     * Refresh sonucu + aktif sertifika sayısı + son-başarı zaman damgası
+     * metrikleri için opsiyonel hook. {@code required=false} — test
+     * slice'larında veya Actuator devre dışıyken null kalır, refresh
+     * akışı etkilenmez.
+     */
+    @Autowired(required = false)
+    private io.mersel.dss.verify.api.metrics.VerificationMetrics verificationMetrics;
+
     @Autowired
     public KamusmRootCertificateService(
             @Value("${trusted.root.resolver.type:kamusm-online}") String resolverType,
@@ -65,7 +74,34 @@ public class KamusmRootCertificateService {
 
     @Scheduled(cron = "${trusted.root.refresh-cron:0 15 3 * * *}")
     public void refreshTrustedRoots() {
-        resolver.refreshTrustedRoots();
+        try {
+            resolver.refreshTrustedRoots();
+        } catch (RuntimeException e) {
+            recordRefreshMetric(false, -1);
+            throw e;
+        }
+        // Başarılı refresh: aktif sertifika sayısını + son-başarı zaman
+        // damgasını gauge'lara yaz. Sayım metric hesabı için best-effort;
+        // hata olursa refresh akışı etkilenmez.
+        int count = -1;
+        try {
+            List<X509Certificate> roots = resolver.getTrustedRoots();
+            count = roots != null ? roots.size() : -1;
+        } catch (RuntimeException ignore) {
+            // sayım alınamadıysa gauge eski değerinde kalır
+        }
+        recordRefreshMetric(true, count);
+    }
+
+    private void recordRefreshMetric(boolean success, int certificateCount) {
+        if (verificationMetrics == null) {
+            return;
+        }
+        try {
+            verificationMetrics.recordTrustedRootRefresh(success, certificateCount);
+        } catch (RuntimeException ignore) {
+            // metric akışı bozamaz
+        }
     }
 
     public List<X509Certificate> getTrustedRoots() {

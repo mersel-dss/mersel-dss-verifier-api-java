@@ -75,6 +75,9 @@ public class NormalizingCachingAiaDataLoader implements DataLoader {
     private final transient DataLoader delegate;
     private final transient Cache<String, byte[]> cache;
 
+    /** İş metrikleri için opsiyonel hook; {@code null} olabilir. */
+    private final transient io.mersel.dss.verify.api.metrics.VerificationMetrics metrics;
+
     /**
      * @param delegate          asıl HTTP fetch yapan DataLoader (tipik
      *                          {@code CommonsDataLoader})
@@ -84,7 +87,21 @@ public class NormalizingCachingAiaDataLoader implements DataLoader {
     public NormalizingCachingAiaDataLoader(DataLoader delegate,
                                            long maxCacheSize,
                                            long cacheTtlSeconds) {
+        this(delegate, maxCacheSize, cacheTtlSeconds, null);
+    }
+
+    /**
+     * Metrics-aware constructor — gerçek AIA fetch (cache-miss) süresi +
+     * sonucunu {@code mdss_aia_fetch_duration_seconds} Timer'ına yazar.
+     *
+     * @param metrics fetch metriği hook'u; {@code null} olabilir.
+     */
+    public NormalizingCachingAiaDataLoader(DataLoader delegate,
+                                           long maxCacheSize,
+                                           long cacheTtlSeconds,
+                                           io.mersel.dss.verify.api.metrics.VerificationMetrics metrics) {
         this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
+        this.metrics = metrics;
         if (maxCacheSize <= 0) {
             throw new IllegalArgumentException("maxCacheSize must be > 0, was: " + maxCacheSize);
         }
@@ -115,10 +132,12 @@ public class NormalizingCachingAiaDataLoader implements DataLoader {
             return cached;
         }
         logger.info("AIA fetch: {}", url);
+        long fetchStartNanos = System.nanoTime();
         byte[] raw;
         try {
             raw = delegate.get(url);
         } catch (RuntimeException e) {
+            recordFetch("error", fetchStartNanos);
             logger.warn("AIA fetch failed for url='{}': {}", url, e.getMessage());
             // Hatayı cache'lemiyoruz — transient olabilir, bir sonraki çağrıda
             // tekrar denenmesi DSS'in kontrolünde olsun.
@@ -126,16 +145,29 @@ public class NormalizingCachingAiaDataLoader implements DataLoader {
         }
 
         if (raw == null || raw.length == 0) {
+            recordFetch("empty", fetchStartNanos);
             logger.info("AIA fetch returned empty for url='{}'; cached as negative", url);
             cache.put(url, NEGATIVE_MARKER);
             return null;
         }
 
+        recordFetch("success", fetchStartNanos);
         byte[] normalized = normalize(raw, url);
         cache.put(url, normalized);
         logger.info("AIA cached: url={}, originalBytes={}, normalizedBytes={}",
                 url, raw.length, normalized.length);
         return normalized;
+    }
+
+    private void recordFetch(String outcome, long startNanos) {
+        if (metrics == null) {
+            return;
+        }
+        try {
+            metrics.recordAiaFetch(outcome, System.nanoTime() - startNanos);
+        } catch (RuntimeException ignore) {
+            // metric akışı bozamaz
+        }
     }
 
     @Override

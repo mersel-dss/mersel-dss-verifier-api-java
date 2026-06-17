@@ -301,6 +301,16 @@ public class AdvancedSignatureVerificationService {
     @Autowired(required = false)
     private MeterRegistry meterRegistry;
 
+    /**
+     * Domain-seviyesi iş metriklerinin tek giriş noktası — uçtan uca +
+     * aşama bazlı süreler, sonuç dağılımı, imza başına indication/
+     * subIndication. Spring her zaman context'e koyar; test slice'larında
+     * yoksa {@code required=false} ile null kalır ve enstrümantasyon
+     * sessizce atlanır (doğrulama akışı etkilenmez).
+     */
+    @Autowired(required = false)
+    private io.mersel.dss.verify.api.metrics.VerificationMetrics verificationMetrics;
+
     // Built-in policy profilleri. signer-strict default — imzacı için
     // OCSP/CRL FAIL, ara CA için WARN. strict — eIDAS-QES paralelinde
     // her katmanda FAIL.
@@ -432,6 +442,12 @@ public class AdvancedSignatureVerificationService {
         logger.info("Starting advanced signature verification. Level: {}, includeFailedConstraints: {}",
                 level, includeFailedConstraints);
 
+        // İstek sonuçlanma süresi (uçtan uca) + aşama bazlı süre ölçümü
+        // için zaman damgaları. nanoTime monotonik — wall-clock saat
+        // ayarından etkilenmez.
+        final long verificationStartNanos = System.nanoTime();
+        final String levelTag = level != null ? level.name() : null;
+
         // Dosya metadatasını ve byte içeriklerini ÖNDEN oku. Doğrulayıcı (DSS)
         // tarafında parse hatası (örn. bozuk/namespace eksik XML) atılırsa
         // ana try/catch'in sonunda bu değerlerle Slack/webhook bildirimini
@@ -445,6 +461,10 @@ public class AdvancedSignatureVerificationService {
                 ? originalDocument.getOriginalFilename() : null;
         byte[] signedBytes = null;
         byte[] originalBytes = null;
+
+        // Aşama sınırlarını işaretleyen değişken; her aşama bittiğinde
+        // güncellenir (read_input → build_validator → dss_validate → parse_result).
+        long stageStartNanos = System.nanoTime();
 
         try {
             signedBytes = signedDocument.getBytes();
@@ -472,6 +492,9 @@ public class AdvancedSignatureVerificationService {
                 detachedContents.add(detachedContent);
             }
 
+            // Aşama: read_input (multipart oku + ECDSA preprocess + detached oku) bitti.
+            stageStartNanos = recordStage("read_input", stageStartNanos);
+
             // Validator oluştur
             SignedDocumentValidator validator = SignedDocumentValidator.fromDocument(document);
 
@@ -497,10 +520,18 @@ public class AdvancedSignatureVerificationService {
             // fallback yok, çünkü yanlış policy ile valid göstermek prod
             // riski yaratır. Default profil signer-strict (KamuSM Mali Mühür
             // için imzacı OCSP/CRL zorunlu, ara CA WARN).
+            // Aşama: build_validator (validator + locale + detached + certificate verifier) bitti.
+            stageStartNanos = recordStage("build_validator", stageStartNanos);
+
             Reports reports;
             try (InputStream policyStream = openValidationPolicyStream()) {
                 reports = validator.validateDocument(policyStream);
             }
+
+            // Aşama: dss_validate — DSS validation pipeline'ı (OCSP/CRL/AIA
+            // fetch dahil) bitti. Tipik olarak en pahalı aşama; "doğrulama
+            // neden yavaş?" sorusunun ilk bakılacak yeri.
+            stageStartNanos = recordStage("dss_validate", stageStartNanos);
 
             // Detaylı DSS raporu: yalnızca DEBUG seviyesinde logla. Trust chain
             // problemlerini ayıklarken hızlıca açılabilir (logback level=DEBUG),
@@ -531,6 +562,13 @@ public class AdvancedSignatureVerificationService {
             VerificationResult result = parseAdvancedVerificationResult(
                     reports, level, signedBytes, packagingBySignatureId,
                     includeFailedConstraints);
+
+            // Aşama: parse_result (DSS rapor → VerificationResult) bitti.
+            recordStage("parse_result", stageStartNanos);
+
+            // Uçtan uca süre + sonuç dağılımı + imza başına indication/
+            // subIndication kök neden sayaçları.
+            recordVerificationOutcome(result, levelTag, verificationStartNanos);
 
             logger.info("Advanced signature verification completed. Valid: {}, Signatures: {}",
                     result.isValid(), result.getSignatures().size());
@@ -575,6 +613,15 @@ public class AdvancedSignatureVerificationService {
 
         } catch (Exception e) {
             logger.error("Advanced signature verification failed: {}", e.getMessage(), e);
+
+            // Hata metriği: exception sınıfı + uçtan uca süre (result=error).
+            // Operatör "doğrulama hiç çalıştırılamadı" vakalarını ayrı bir
+            // sinyalde görür (parse/IO hatası vs. gerçek INVALID imza).
+            if (verificationMetrics != null) {
+                verificationMetrics.recordVerificationError(e.getClass().getSimpleName());
+                verificationMetrics.recordVerification("unknown", levelTag, "error",
+                        System.nanoTime() - verificationStartNanos);
+            }
 
             // ÖNEMLİ: Doğrulama exception'ı (örn. bozuk XML, eksik
             // namespace, parse hatası) atıldığında Slack/webhook bildirimi
@@ -680,6 +727,63 @@ public class AdvancedSignatureVerificationService {
             // VerificationException ile yukarıya bilgi taşıyor.
             logger.warn("Verification failure notification dispatch failed (yok sayıldı): {}",
                     t.toString());
+        }
+    }
+
+    /**
+     * Bir doğrulama aşamasının süresini ({@code now - stageStartNanos})
+     * {@code mdss_verification_stage_duration_seconds{stage=...}} Timer'ına
+     * yazar ve bir sonraki aşamanın başlangıcı için yeni bir nano
+     * zaman damgası döner. Metric registry yoksa yalnız zaman damgasını
+     * döndürür (no-op). Bu metoda gelene kadar aşama başarıyla tamamlanmış
+     * sayılır; aradaki exception'lar dış catch'te toplanır.
+     *
+     * @param stage          aşama etiketi (read_input, build_validator, ...)
+     * @param stageStartNanos aşamanın başladığı {@link System#nanoTime()}
+     * @return yeni nano zaman damgası (sonraki aşama için)
+     */
+    private long recordStage(String stage, long stageStartNanos) {
+        long now = System.nanoTime();
+        if (verificationMetrics != null) {
+            verificationMetrics.recordStage(stage, "ok", now - stageStartNanos);
+        }
+        return now;
+    }
+
+    /**
+     * Doğrulama tamamlandığında uçtan uca süreyi + sonuç sınıfını ve
+     * imza başına {@code indication}/{@code subIndication} kök neden
+     * sayaçlarını kaydeder.
+     *
+     * <p>Uçtan uca Timer'ın {@code result} etiketi imza geçerliyse
+     * {@code valid}, değilse {@code invalid}. Asıl "neden geçersiz?"
+     * detayı imza başına {@code mdss_signature_results_total} sayacında —
+     * her imzanın DSS indication + sub_indication'ı ayrı seri olur.</p>
+     */
+    private void recordVerificationOutcome(VerificationResult result, String levelTag,
+                                           long verificationStartNanos) {
+        if (verificationMetrics == null || result == null) {
+            return;
+        }
+        try {
+            String typeTag = result.getSignatureType() != null
+                    ? result.getSignatureType().name() : "unknown";
+            String resultTag = result.isValid() ? "valid" : "invalid";
+            verificationMetrics.recordVerification(typeTag, levelTag, resultTag,
+                    System.nanoTime() - verificationStartNanos);
+
+            List<SignatureInfo> signatures = result.getSignatures();
+            if (signatures != null) {
+                for (SignatureInfo s : signatures) {
+                    if (s == null) {
+                        continue;
+                    }
+                    verificationMetrics.recordSignatureResult(
+                            typeTag, s.getIndication(), s.getSubIndication());
+                }
+            }
+        } catch (RuntimeException ignore) {
+            // Metrik kaydı doğrulama akışını asla bozmaz.
         }
     }
 

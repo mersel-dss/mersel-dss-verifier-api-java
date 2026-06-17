@@ -63,6 +63,9 @@ public class AdvancedTimestampVerificationService {
     @Autowired
     private RevocationInfoExtractor revocationInfoExtractor;
 
+    @Autowired(required = false)
+    private io.mersel.dss.verify.api.metrics.VerificationMetrics verificationMetrics;
+
     /**
      * Cache + logging sarmalli OCSP source.
      * {@link io.mersel.dss.verify.api.config.RevocationServicesConfiguration}'da
@@ -94,6 +97,8 @@ public class AdvancedTimestampVerificationService {
 
         logger.info("Starting advanced timestamp verification. ValidateCert: {}", validateCertificate);
 
+        final long tsStartNanos = System.nanoTime();
+
         try {
             // Timestamp token'ı oku
             byte[] timestampBytes = timestampFile.getBytes();
@@ -109,6 +114,9 @@ public class AdvancedTimestampVerificationService {
                 response.setValid(false);
                 response.setStatus("INVALID_FORMAT");
                 response.setErrors(errors);
+                if (verificationMetrics != null) {
+                    verificationMetrics.recordTimestamp("invalid_format", System.nanoTime() - tsStartNanos);
+                }
                 return response;
             }
 
@@ -175,10 +183,17 @@ public class AdvancedTimestampVerificationService {
             response.setWarnings(warnings);
 
             logger.info("Advanced timestamp verification completed. Valid: {}", isValid);
+            if (verificationMetrics != null) {
+                verificationMetrics.recordTimestamp(isValid ? "valid" : "invalid",
+                        System.nanoTime() - tsStartNanos);
+            }
             return response;
 
         } catch (Exception e) {
             logger.error("Advanced timestamp verification failed: {}", e.getMessage(), e);
+            if (verificationMetrics != null) {
+                verificationMetrics.recordTimestamp("error", System.nanoTime() - tsStartNanos);
+            }
             throw new TimestampException("Zaman damgası doğrulama hatası: " + e.getMessage(), e);
         }
     }

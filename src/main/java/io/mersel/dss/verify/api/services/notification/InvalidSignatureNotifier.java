@@ -143,6 +143,14 @@ public class InvalidSignatureNotifier {
     private InvalidSignatureNotificationConfiguration config;
 
     /**
+     * Bildirim dispatch sayaçları için opsiyonel hook
+     * ({@code mdss_notification_dispatch_total{channel,event}}).
+     * {@code required=false} — testlerde/Actuator devre dışıyken null.
+     */
+    @Autowired(required = false)
+    private io.mersel.dss.verify.api.metrics.VerificationMetrics verificationMetrics;
+
+    /**
      * Spring Boot {@code spring-boot-maven-plugin:build-info} tarafından
      * üretilen META-INF/build-info.properties'tan gelir. <em>Test sırasında
      * yoksa</em> {@code null} olabilir — {@code source} alanını fallback
@@ -393,6 +401,7 @@ public class InvalidSignatureNotifier {
             // Çok büyük dosyaları async upload trafiğine sokmak Slack
             // bot rate-limit'lerini de gereksiz tüketir.
             try {
+                recordNotification("slack_file", "attempt");
                 slackFileUploader.uploadAsync(
                         config.getSlackBotToken(),
                         config.getSlackBotChannel(),
@@ -934,6 +943,8 @@ public class InvalidSignatureNotifier {
             return;
         }
 
+        recordNotification("webhook", "attempt");
+
         String deliveryId = idGenerator.get();
         long timestampSeconds = unixSecondsClock.getAsLong();
 
@@ -991,6 +1002,7 @@ public class InvalidSignatureNotifier {
                 // OkHttp connect / read / write timeout, DNS hatası, TLS
                 // handshake reset hepsi buraya düşer — async dispatcher
                 // thread'inde. WARN log + sus.
+                recordNotification("webhook", "failure");
                 logger.warn("InvalidSignatureNotifier webhook POST başarısız ({}): {} [delivery-id={}]",
                         url, e.getMessage(), deliveryId);
             }
@@ -1000,9 +1012,11 @@ public class InvalidSignatureNotifier {
                 try {
                     int code = response.code();
                     if (code >= 200 && code < 300) {
+                        recordNotification("webhook", "success");
                         logger.debug("InvalidSignatureNotifier webhook POST OK ({} {}) [delivery-id={}]",
                                 code, url, deliveryId);
                     } else {
+                        recordNotification("webhook", "failure");
                         logger.warn("InvalidSignatureNotifier webhook POST non-2xx: "
                                         + "{} {} (receiver={}, delivery-id={})",
                                 code, response.message(), url, deliveryId);
@@ -1041,6 +1055,7 @@ public class InvalidSignatureNotifier {
                     channelLabel);
             return;
         }
+        recordNotification(channelLabel, "attempt");
         Request request;
         try {
             request = new Request.Builder()
@@ -1057,6 +1072,7 @@ public class InvalidSignatureNotifier {
         httpClient.newCall(request).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
+                recordNotification(channelLabel, "failure");
                 logger.warn("InvalidSignatureNotifier {} POST başarısız ({}): {}",
                         channelLabel, url, e.getMessage());
             }
@@ -1066,9 +1082,11 @@ public class InvalidSignatureNotifier {
                 try {
                     int code = response.code();
                     if (code >= 200 && code < 300) {
+                        recordNotification(channelLabel, "success");
                         logger.debug("InvalidSignatureNotifier {} POST OK ({} {})",
                                 channelLabel, code, url);
                     } else {
+                        recordNotification(channelLabel, "failure");
                         logger.warn("InvalidSignatureNotifier {} POST non-2xx: {} {} (receiver={})",
                                 channelLabel, code, response.message(), url);
                     }
@@ -1104,6 +1122,24 @@ public class InvalidSignatureNotifier {
         } catch (Exception e) {
             logger.warn("HMAC-SHA256 hesaplanamadı: {}", e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * Bildirim dispatch sayacını artırır. Metric hook null ise no-op;
+     * hata asla bildirim akışını bozmaz.
+     *
+     * @param channel {@code webhook} / {@code slack} / {@code slack_file}
+     * @param event   {@code attempt} / {@code success} / {@code failure}
+     */
+    private void recordNotification(String channel, String event) {
+        if (verificationMetrics == null) {
+            return;
+        }
+        try {
+            verificationMetrics.recordNotification(channel, event);
+        } catch (Throwable ignore) {
+            // metric akışı bildirim akışını bozamaz
         }
     }
 

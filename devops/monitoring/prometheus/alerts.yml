@@ -4,7 +4,7 @@ groups:
     rules:
       # High Error Rate
       - alert: HighErrorRate
-        expr: rate(http_server_requests_seconds_count{application="verify-api",status=~"5.."}[5m]) > 0.1
+        expr: rate(http_server_requests_seconds_count{application="mersel-dss-verify-api",status=~"5.."}[5m]) > 0.1
         for: 5m
         labels:
           severity: critical
@@ -15,7 +15,7 @@ groups:
 
       # High Response Time
       - alert: HighResponseTime
-        expr: histogram_quantile(0.95, rate(http_server_requests_seconds_bucket{application="verify-api"}[5m])) > 2
+        expr: histogram_quantile(0.95, rate(http_server_requests_seconds_bucket{application="mersel-dss-verify-api"}[5m])) > 2
         for: 5m
         labels:
           severity: warning
@@ -26,7 +26,7 @@ groups:
 
       # High Memory Usage
       - alert: HighMemoryUsage
-        expr: (jvm_memory_used_bytes{application="verify-api",area="heap"} / jvm_memory_max_bytes{application="verify-api",area="heap"}) > 0.9
+        expr: (jvm_memory_used_bytes{application="mersel-dss-verify-api",area="heap"} / jvm_memory_max_bytes{application="mersel-dss-verify-api",area="heap"}) > 0.9
         for: 5m
         labels:
           severity: warning
@@ -37,7 +37,7 @@ groups:
 
       # High CPU Usage
       - alert: HighCpuUsage
-        expr: system_cpu_usage{application="verify-api"} > 0.8
+        expr: system_cpu_usage{application="mersel-dss-verify-api"} > 0.8
         for: 5m
         labels:
           severity: warning
@@ -59,7 +59,7 @@ groups:
 
       # High Request Rate
       - alert: HighRequestRate
-        expr: rate(http_server_requests_seconds_count{application="verify-api"}[5m]) > 100
+        expr: rate(http_server_requests_seconds_count{application="mersel-dss-verify-api"}[5m]) > 100
         for: 10m
         labels:
           severity: info
@@ -68,16 +68,135 @@ groups:
           summary: "High request rate in Verify API"
           description: "Request rate is {{ $value }} req/s"
 
-      # Verification Failures
+      # Verification Failures — INVALID oranı (gerçek metrik:
+      # mdss_verification_duration_seconds_count{result="invalid"}).
+      # Eski 'verification_failures_total' metriği hiç implement edilmemişti;
+      # VerificationMetrics ile uçtan uca Timer'ın result etiketine geçtik.
       - alert: HighVerificationFailureRate
-        expr: rate(verification_failures_total{application="verify-api"}[5m]) > 0.2
+        expr: |
+          sum(rate(mdss_verification_duration_seconds_count{result="invalid"}[5m]))
+          /
+          clamp_min(sum(rate(mdss_verification_duration_seconds_count[5m])), 0.001)
+          > 0.2
         for: 5m
         labels:
           severity: warning
           service: verify-api
         annotations:
-          summary: "High verification failure rate"
-          description: "Verification failure rate is {{ $value | humanizePercentage }}"
+          summary: "İmza doğrulama INVALID oranı yüksek"
+          description: "Doğrulamaların {{ $value | humanizePercentage }}'i INVALID dönüyor (son 5dk)."
+
+      # Verification ERROR — doğrulama hiç çalıştırılamadı (parse/IO hatası).
+      # INVALID imzadan ayrı bir sinyal: kod/girdi/altyapı problemi.
+      - alert: HighVerificationErrorRate
+        expr: sum(rate(mdss_verification_errors_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+          service: verify-api
+        annotations:
+          summary: "Doğrulama hata (exception) oranı yüksek"
+          description: >
+            Son 5 dakikada {{ $value }} req/s doğrulama exception ile patladı
+            (parse/IO/altyapı). Kök neden için:
+            `sum by (exception) (rate(mdss_verification_errors_total[5m]))`.
+
+      # Uçtan uca doğrulama latency SLO ihlali (p95 > 5s).
+      - alert: HighVerificationLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(mdss_verification_duration_seconds_bucket[5m])) by (le)) > 5
+        for: 10m
+        labels:
+          severity: warning
+          service: verify-api
+        annotations:
+          summary: "Doğrulama p95 latency yüksek (>5s)"
+          description: >
+            İstek sonuçlanma süresi p95 = {{ $value }}s. Aşama kıran için:
+            `histogram_quantile(0.95, sum by (le,stage)
+            (rate(mdss_verification_stage_duration_seconds_bucket[5m])))`.
+            Genellikle dss_validate (OCSP/CRL fetch) baskındır.
+
+      # Revocation (OCSP/CRL) fetch hata oranı — KamuSM bağımlılığı down/flaky.
+      - alert: HighRevocationFetchErrorRate
+        expr: |
+          sum(rate(mdss_revocation_fetch_duration_seconds_count{outcome="error"}[5m]))
+          > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          service: verify-api
+          subsystem: revocation
+        annotations:
+          summary: "Revocation (OCSP/CRL) fetch hataları yüksek"
+          description: >
+            Son 5dk'da {{ $value }} req/s OCSP/CRL fetch hata döndü. Tip kıran:
+            `sum by (type,outcome) (rate(mdss_revocation_fetch_duration_seconds_count[5m]))`.
+            Retry tükeniyorsa: `rate(mdss_revocation_retry_total{event="exhausted"}[5m])`.
+            Strict policy'de bu doğrudan INDETERMINATE/NO_REVOCATION_DATA üretir.
+
+      # Tomcat worker thread havuzu doygunluğu — bu servisin klasik arıza
+      # paterni. KamuSM OCSP/CRL yavaşlayınca revocation fetch'leri uzar,
+      # thread'ler blokede birikir ve havuz dolar; doygun pod yeni isteklere
+      # cevap veremez → istemciler HttpTimeout alır. ThreadPoolSaturation
+      # HealthIndicator readiness'ı OUT_OF_SERVICE yapıp pod'u LB'den düşürür;
+      # bu alert ise operatörü erken uyarır (eşik HealthIndicator'dan düşük).
+      - alert: HighTomcatThreadSaturation
+        expr: |
+          tomcat_threads_busy_threads{application="mersel-dss-verify-api"}
+          /
+          clamp_min(tomcat_threads_config_max_threads{application="mersel-dss-verify-api"}, 1)
+          > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          service: verify-api
+          subsystem: runtime
+        annotations:
+          summary: "Tomcat thread havuzu doygunluğa yaklaşıyor (>%85)"
+          description: >
+            Worker thread kullanımı {{ $value | humanizePercentage }}. Genellikle
+            KamuSM OCSP/CRL yavaşlığı thread'leri blokede tutuyor demektir;
+            `histogram_quantile(0.95, sum by (le,type)
+            (rate(mdss_revocation_fetch_duration_seconds_bucket[5m])))` ile fetch
+            latency'sini kontrol edin. Sürerse readiness OUT_OF_SERVICE olup
+            pod LB'den düşer.
+
+      # Güvenilir kök sertifika refresh'i bayatladı (son başarı > 26 saat önce).
+      # Cron günde bir çalışır (0 15 3 * * *); 26 saat eşiği bir kaçırılan
+      # çalıştırmayı yakalar. last_success 0 ise (hiç başarı yok) startup
+      # sonrası ilk birkaç dakika için 'for' süresi tampon sağlar.
+      - alert: TrustedRootRefreshStale
+        expr: |
+          (time() - mdss_trusted_root_last_success_timestamp_seconds) > 93600
+          and mdss_trusted_root_last_success_timestamp_seconds > 0
+        for: 15m
+        labels:
+          severity: warning
+          service: verify-api
+          subsystem: trust-store
+        annotations:
+          summary: "KamuSM kök sertifika deposu bayatladı"
+          description: >
+            Son başarılı kök sertifika refresh'i {{ $value | humanizeDuration }}
+            önceydi. Cron başarısız oluyor olabilir; KamuSM XML depo
+            erişilebilirliğini kontrol edin.
+
+      # Güven deposu boş — yüklü kök sertifika yok. Her doğrulama untrusted
+      # chain ile patlar; kritik.
+      - alert: TrustedRootStoreEmpty
+        expr: mdss_trusted_root_certificates == 0
+        for: 10m
+        labels:
+          severity: critical
+          service: verify-api
+          subsystem: trust-store
+        annotations:
+          summary: "Güven deposunda kök sertifika yok"
+          description: >
+            mdss_trusted_root_certificates = 0. Resolver yüklemesi başarısız;
+            tüm doğrulamalar trust chain kuramayacak.
 
       # =====================================================================
       # MDSS Tolerance Gate (KamuSM/GİB XAdES legacy Type URI) — gate v2

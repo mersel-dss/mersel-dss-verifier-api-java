@@ -59,6 +59,16 @@ public class RetryingOCSPSource implements OCSPSource {
         this.retryExecutor = new RetryExecutor(policy, sleeper);
     }
 
+    /**
+     * Metrics-aware production constructor — retry olaylarini
+     * {@code mdss_revocation_retry_total{type="ocsp"}} sayacina yazar.
+     */
+    public RetryingOCSPSource(OCSPSource delegate, RetryPolicy policy,
+                              io.mersel.dss.verify.api.metrics.VerificationMetrics metrics) {
+        this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
+        this.retryExecutor = new RetryExecutor(policy, Sleeper.threadSleep(), metrics, "ocsp");
+    }
+
     @Override
     public OCSPToken getRevocationToken(CertificateToken certificateToken,
                                         CertificateToken issuerCertificateToken) {
