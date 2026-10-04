@@ -7,6 +7,8 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-04
+
 > **Canlı ortam notu:** Bu sürümün yeni davranışları üç feature flag
 > arkasındadır ve üçü de varsayılan olarak **kapalıdır**:
 > `POLICY_ACTIVATION_ENABLED`, `REQUEST_TRUST_ENABLED` (ayrıca `evaluation`
