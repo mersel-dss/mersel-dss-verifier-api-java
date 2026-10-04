@@ -97,6 +97,27 @@ public class GlobalExceptionHandler {
         return new ResponseEntity<>(error, HttpStatus.PAYLOAD_TOO_LARGE);
     }
 
+    @ExceptionHandler(io.mersel.dss.verify.api.exceptions.TrustConflictException.class)
+    public ResponseEntity<ErrorResponse> handleTrustConflict(io.mersel.dss.verify.api.exceptions.TrustConflictException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(new ErrorResponse("TRUST_CHANGED", ex.getMessage(), "Aktif kök kümesini yenileyin"));
+    }
+
+    @ExceptionHandler(io.mersel.dss.verify.api.exceptions.PolicyActivationException.class)
+    public ResponseEntity<ErrorResponse> handlePolicyActivation(
+            io.mersel.dss.verify.api.exceptions.PolicyActivationException ex, WebRequest request) {
+        // Mesaj kullanıcı XML'inden parça içerebilir; log'a yalnız hata kodu yazılır.
+        logger.warn("Policy activation rejected: {}", ex.getError());
+        // 503 POLICY_UNAVAILABLE güncel policyId'yi taşır: istemci onunla bir politika etkinleştirip kurtarabilir.
+        ErrorResponse error = ex.getPolicyId() != null
+                ? new io.mersel.dss.verify.api.models.PolicyErrorResponse(ex.getError(), ex.getMessage(),
+                        ex.getDetails(), ex.getPolicyId(), ex.getActivationEnabled())
+                : new ErrorResponse(ex.getError(), ex.getMessage(), ex.getDetails());
+        error.setPath(request.getDescription(false).replace("uri=", ""));
+        // Açık JSON: GET /api/v1/policy/active/xml "Accept: application/xml" ile çağrılsa da 503 gövdesi aynıdır.
+        return ResponseEntity.status(ex.getStatus()).contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .body(error);
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<ErrorResponse> handleIllegalArgumentException(
             IllegalArgumentException ex, WebRequest request) {

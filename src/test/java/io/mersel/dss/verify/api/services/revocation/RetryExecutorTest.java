@@ -182,6 +182,63 @@ class RetryExecutorTest {
     }
 
     @Test
+    @DisplayName("Siniflandirici kalici derse retry yapilmaz, sleep yok, ayni exception firlatilir")
+    void permanentFailureIsNotRetried() {
+        RetryPolicy policy = new RetryPolicy(3, 100L, 1000L, 2.0d, 0.0d);
+        RecordingSleeper sleeper = new RecordingSleeper();
+        RetryExecutor exec = new RetryExecutor(policy, sleeper, null, null, RevocationFailureClassifier.INSTANCE);
+
+        AtomicInteger calls = new AtomicInteger(0);
+        RuntimeException http400 = RevocationFailureCacheTest.permanentFailure();
+        RuntimeException thrown = assertThrows(RuntimeException.class, () ->
+                exec.execute("CRL fetch", () -> {
+                    calls.incrementAndGet();
+                    throw http400;
+                }));
+
+        assertSame(http400, thrown);
+        assertEquals(1, calls.get());
+        assertTrue(sleeper.sleeps.isEmpty());
+    }
+
+    @Test
+    @DisplayName("Gecici sonra kalici: ilk hata retry'lanir, kalici gorulunce durulur")
+    void transientThenPermanentStops() {
+        RetryPolicy policy = new RetryPolicy(5, 100L, 1000L, 2.0d, 0.0d);
+        RecordingSleeper sleeper = new RecordingSleeper();
+        RetryExecutor exec = new RetryExecutor(policy, sleeper, null, null, RevocationFailureClassifier.INSTANCE);
+
+        AtomicInteger calls = new AtomicInteger(0);
+        assertThrows(RuntimeException.class, () ->
+                exec.execute("CRL fetch", () -> {
+                    if (calls.incrementAndGet() == 1) {
+                        throw RevocationFailureCacheTest.transientFailure();
+                    }
+                    throw RevocationFailureCacheTest.permanentFailure();
+                }));
+
+        assertEquals(2, calls.get());
+        assertEquals(1, sleeper.sleeps.size());
+    }
+
+    @Test
+    @DisplayName("Siniflandirici exception firlatirsa eski davranis (retry) korunur")
+    void classifierErrorFallsBackToRetry() {
+        RetryPolicy policy = new RetryPolicy(3, 100L, 1000L, 2.0d, 0.0d);
+        RetryExecutor exec = new RetryExecutor(policy, new RecordingSleeper(), null, null, failure -> {
+            throw new IllegalStateException("classifier bug");
+        });
+
+        AtomicInteger calls = new AtomicInteger(0);
+        assertThrows(RuntimeException.class, () ->
+                exec.execute("op", () -> {
+                    calls.incrementAndGet();
+                    throw new RuntimeException("x");
+                }));
+        assertEquals(3, calls.get());
+    }
+
+    @Test
     @DisplayName("applyJitter: jitterRatio=0.0 raw degerini doner")
     void noJitterReturnsRaw() {
         assertEquals(500L, RetryExecutor.applyJitter(500L, 0.0d));

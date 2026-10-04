@@ -10,6 +10,14 @@ import java.util.List;
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class TimestampInfo {
+    /** All timestamps use DSS identifiers; imprint evidence is separate from the full validation indication. */
+    private String timestampId;
+    private String indication;
+    private String subIndication;
+    private List<CertificateInfo> certificateChain;
+    private Boolean messageImprintDataFound;
+    private Boolean messageImprintDataIntact;
+
     private boolean valid;
     private Date timestampTime;
     private String timestampType;
@@ -139,5 +147,22 @@ public class TimestampInfo {
     public void setFailedConstraints(List<FailedConstraint> failedConstraints) {
         this.failedConstraints = failedConstraints;
     }
-}
 
+    public String getTimestampId() { return timestampId; }
+    public void setTimestampId(String timestampId) { this.timestampId = timestampId; }
+
+    public String getIndication() { return indication; }
+    public void setIndication(String indication) { this.indication = indication; }
+
+    public String getSubIndication() { return subIndication; }
+    public void setSubIndication(String subIndication) { this.subIndication = subIndication; }
+
+    public List<CertificateInfo> getCertificateChain() { return certificateChain; }
+    public void setCertificateChain(List<CertificateInfo> certificateChain) { this.certificateChain = certificateChain; }
+
+    public Boolean getMessageImprintDataFound() { return messageImprintDataFound; }
+    public void setMessageImprintDataFound(Boolean messageImprintDataFound) { this.messageImprintDataFound = messageImprintDataFound; }
+
+    public Boolean getMessageImprintDataIntact() { return messageImprintDataIntact; }
+    public void setMessageImprintDataIntact(Boolean messageImprintDataIntact) { this.messageImprintDataIntact = messageImprintDataIntact; }
+}

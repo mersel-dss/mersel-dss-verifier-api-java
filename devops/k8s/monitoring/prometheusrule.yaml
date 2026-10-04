@@ -1,0 +1,228 @@
+# =============================================================================
+# PrometheusRule — Mersel DSS Verify API alert kurallari (Operator formatinda)
+#
+# devops/monitoring/prometheus/alerts.yml'in CRD karsiligi. Tek fark:
+#   - ServiceDown artik up{job="verify-api"} yerine ServiceMonitor'un urettigi
+#     'job' etiketini (jobLabel=app.kubernetes.io/name →
+#     'mersel-signature-verifier-proxy') kullanir.
+#   - Diger tum kurallar uygulamanin kendi application="mersel-dss-verify-api"
+#     etiketini kullandigindan Operator'dan bagimsiz calisir.
+#
+# metadata.labels.release = prometheus → Prometheus CR ruleSelector'u bunu
+# secer (serviceMonitorSelector ile ayni mantik). Dogrulama:
+#   kubectl -n o11y get prometheus -o jsonpath='{.items[*].spec.ruleSelector}'
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: mersel-signature-verifier-proxy
+  namespace: o11y
+  labels:
+    release: prometheus
+spec:
+  groups:
+    - name: verify_api_alerts
+      interval: 30s
+      rules:
+        # --- Genel HTTP/altyapi ---
+        - alert: HighErrorRate
+          expr: rate(http_server_requests_seconds_count{application="mersel-dss-verify-api",status=~"5.."}[5m]) > 0.1
+          for: 5m
+          labels:
+            severity: critical
+            service: verify-api
+          annotations:
+            summary: "High error rate detected in Verify API"
+            description: "Verify API has error rate of {{ $value | humanizePercentage }} over the last 5 minutes"
+
+        - alert: HighResponseTime
+          expr: histogram_quantile(0.95, rate(http_server_requests_seconds_bucket{application="mersel-dss-verify-api"}[5m])) > 2
+          for: 5m
+          labels:
+            severity: warning
+            service: verify-api
+          annotations:
+            summary: "High response time in Verify API"
+            description: "95th percentile response time is {{ $value }}s"
+
+        - alert: HighMemoryUsage
+          expr: (jvm_memory_used_bytes{application="mersel-dss-verify-api",area="heap"} / jvm_memory_max_bytes{application="mersel-dss-verify-api",area="heap"}) > 0.9
+          for: 5m
+          labels:
+            severity: warning
+            service: verify-api
+          annotations:
+            summary: "High memory usage in Verify API"
+            description: "JVM heap usage is {{ $value | humanizePercentage }}"
+
+        - alert: HighCpuUsage
+          expr: system_cpu_usage{application="mersel-dss-verify-api"} > 0.8
+          for: 5m
+          labels:
+            severity: warning
+            service: verify-api
+          annotations:
+            summary: "High CPU usage in Verify API"
+            description: "CPU usage is {{ $value | humanizePercentage }}"
+
+        # Operator ortaminda 'job' = jobLabel degeri (app.kubernetes.io/name).
+        - alert: ServiceDown
+          expr: up{job="mersel-signature-verifier-proxy"} == 0
+          for: 1m
+          labels:
+            severity: critical
+            service: verify-api
+          annotations:
+            summary: "Verify API is down"
+            description: "Verify API target {{ $labels.instance }} 1 dakikadan uzun suredir DOWN"
+
+        - alert: HighRequestRate
+          expr: rate(http_server_requests_seconds_count{application="mersel-dss-verify-api"}[5m]) > 100
+          for: 10m
+          labels:
+            severity: info
+            service: verify-api
+          annotations:
+            summary: "High request rate in Verify API"
+            description: "Request rate is {{ $value }} req/s"
+
+        # --- Domain (MDSS) dogrulama metrikleri ---
+        - alert: HighVerificationFailureRate
+          expr: |
+            sum(rate(mdss_verification_duration_seconds_count{application="mersel-dss-verify-api",result="invalid"}[5m]))
+            /
+            clamp_min(sum(rate(mdss_verification_duration_seconds_count{application="mersel-dss-verify-api"}[5m])), 0.0001)
+            > 0.2
+          for: 5m
+          labels:
+            severity: warning
+            service: verify-api
+          annotations:
+            summary: "İmza doğrulama INVALID oranı yüksek"
+            description: "Doğrulamaların {{ $value | humanizePercentage }}'i INVALID dönüyor (son 5dk)."
+
+        - alert: HighVerificationErrorRate
+          expr: sum(rate(mdss_verification_errors_total{application="mersel-dss-verify-api"}[5m])) > 0.1
+          for: 5m
+          labels:
+            severity: critical
+            service: verify-api
+          annotations:
+            summary: "Doğrulama hata (exception) oranı yüksek"
+            description: >
+              Son 5 dakikada {{ $value }} req/s doğrulama exception ile patladı
+              (parse/IO/altyapı). Kök neden için:
+              `sum by (exception) (rate(mdss_verification_errors_total{application="mersel-dss-verify-api"}[5m]))`.
+
+        - alert: HighVerificationLatencyP95
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(mdss_verification_duration_seconds_bucket{application="mersel-dss-verify-api"}[5m])) by (le)) > 5
+          for: 10m
+          labels:
+            severity: warning
+            service: verify-api
+          annotations:
+            summary: "Doğrulama p95 latency yüksek (>5s)"
+            description: >
+              İstek sonuçlanma süresi p95 = {{ $value }}s. Aşama kıran için:
+              `histogram_quantile(0.95, sum by (le,stage)
+              (rate(mdss_verification_stage_duration_seconds_bucket{application="mersel-dss-verify-api"}[5m])))`.
+              Genellikle dss_validate (OCSP/CRL fetch) baskındır.
+
+        # --- Bagimliliklar (KamuSM OCSP/CRL/AIA) ---
+        - alert: HighRevocationFetchErrorRate
+          expr: |
+            sum(rate(mdss_revocation_fetch_duration_seconds_count{application="mersel-dss-verify-api",outcome="error"}[5m]))
+            > 0.2
+          for: 5m
+          labels:
+            severity: warning
+            service: verify-api
+            subsystem: revocation
+          annotations:
+            summary: "Revocation (OCSP/CRL) fetch hataları yüksek"
+            description: >
+              Son 5dk'da {{ $value }} req/s OCSP/CRL fetch hata döndü. Tip kıran:
+              `sum by (type,outcome) (rate(mdss_revocation_fetch_duration_seconds_count{application="mersel-dss-verify-api"}[5m]))`.
+              Retry tükeniyorsa: `rate(mdss_revocation_retry_total{application="mersel-dss-verify-api",event="exhausted"}[5m])`.
+
+        # --- Runtime / thread havuzu doygunlugu (HttpTimeout erken uyari) ---
+        - alert: HighTomcatThreadSaturation
+          expr: |
+            tomcat_threads_busy_threads{application="mersel-dss-verify-api"}
+            /
+            clamp_min(tomcat_threads_config_max_threads{application="mersel-dss-verify-api"}, 1)
+            > 0.85
+          for: 5m
+          labels:
+            severity: warning
+            service: verify-api
+            subsystem: runtime
+          annotations:
+            summary: "Tomcat thread havuzu doygunluğa yaklaşıyor (>%85)"
+            description: >
+              Worker thread kullanımı {{ $value | humanizePercentage }}. Genellikle
+              KamuSM OCSP/CRL yavaşlığı thread'leri blokede tutuyor demektir;
+              `histogram_quantile(0.95, sum by (le,type)
+              (rate(mdss_revocation_fetch_duration_seconds_bucket{application="mersel-dss-verify-api"}[5m])))`
+              ile fetch latency'sini kontrol edin. Sürerse readiness OUT_OF_SERVICE
+              olup pod LB'den düşer.
+
+        # --- Guven deposu ---
+        - alert: TrustedRootRefreshStale
+          expr: |
+            (time() - mdss_trusted_root_last_success_timestamp_seconds{application="mersel-dss-verify-api"}) > 93600
+            and mdss_trusted_root_last_success_timestamp_seconds{application="mersel-dss-verify-api"} > 0
+          for: 15m
+          labels:
+            severity: warning
+            service: verify-api
+            subsystem: trust-store
+          annotations:
+            summary: "KamuSM kök sertifika deposu bayatladı"
+            description: >
+              Son başarılı kök sertifika refresh'i {{ $value | humanizeDuration }}
+              önceydi. Cron başarısız oluyor olabilir; KamuSM XML depo
+              erişilebilirliğini kontrol edin.
+
+        - alert: TrustedRootStoreEmpty
+          expr: mdss_trusted_root_certificates{application="mersel-dss-verify-api"} == 0
+          for: 10m
+          labels:
+            severity: critical
+            service: verify-api
+            subsystem: trust-store
+          annotations:
+            summary: "Güven deposunda kök sertifika yok"
+            description: >
+              mdss_trusted_root_certificates = 0. Resolver yüklemesi başarısız;
+              tüm doğrulamalar trust chain kuramayacak.
+
+        # --- MDSS Tolerance Gate (KamuSM/GIB legacy XAdES) ---
+        - alert: MdssToleranceUsageSpike
+          expr: sum(rate(mdss_tolerance_applied_total{application="mersel-dss-verify-api"}[5m])) > 1
+          for: 10m
+          labels:
+            severity: warning
+            service: verify-api
+            subsystem: tolerance-gate
+          annotations:
+            summary: "MDSS tolerance gate kullanım spike'ı (>1 req/s)"
+            description: >
+              Son 5 dakikada {{ $value }} req/s tolerance uygulaması gözlendi.
+              Sustained yüksek rate ya yeni bir üretici toplu hatalı imza
+              gönderiyor ya da exploit denemesi demektir; forensic inceleyin.
+
+        - alert: MdssToleranceRejectionRateHigh
+          expr: sum(rate(mdss_tolerance_rejected_total{application="mersel-dss-verify-api"}[5m])) > 5
+          for: 10m
+          labels:
+            severity: info
+            service: verify-api
+            subsystem: tolerance-gate
+          annotations:
+            summary: "MDSS tolerance rejection rate yüksek (>5 req/s)"
+            description: >
+              Tolerance gate son 5 dakikada {{ $value }} req/s vakayı REDDETTİ.
+              Nedenler: `sum by (reason) (rate(mdss_tolerance_rejected_total{application="mersel-dss-verify-api"}[10m]))`.

@@ -17,6 +17,7 @@ import io.mersel.dss.verify.api.models.CertificateInfo;
 import io.mersel.dss.verify.api.models.RevocationInfo;
 import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService;
 import io.mersel.dss.verify.api.services.util.CertificateInfoExtractor;
+import io.mersel.dss.verify.api.services.util.TimestampCertificateEvidenceExtractor;
 import io.mersel.dss.verify.api.services.util.RevocationInfoExtractor;
 import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cms.CMSSignedData;
@@ -87,7 +88,6 @@ public class TimestampVerificationService {
             TimestampToken timestampToken = parseTimestampToken(timestampBytes);
 
             TimestampVerificationResponseDto response = new TimestampVerificationResponseDto();
-            response.setTimestampTime(timestampToken.getGenerationTime());
             
             List<String> errors = new ArrayList<>();
             List<String> warnings = new ArrayList<>();
@@ -100,6 +100,8 @@ public class TimestampVerificationService {
                 response.setErrors(errors);
                 return response;
             }
+
+            response.setTimestampTime(timestampToken.getGenerationTime());
 
             // 2. Timestamp'in bütünlüğünü kontrol et
             boolean tokenValid = verifyTimestampIntegrity(timestampToken, timestampBytes);
@@ -122,43 +124,49 @@ public class TimestampVerificationService {
                     && !timestampToken.getCertificates().isEmpty()) {
                 
                 List<CertificateToken> tsaChain = timestampToken.getCertificates();
-                CertificateToken tsaCert = tsaChain.get(0);
-                CertificateInfo certInfo = certificateInfoExtractor.extractCertificateInfo(tsaCert);
-                response.setTsaCertificate(certInfo);
-                response.setTsaName(tsaCert.getSubject().getPrettyPrintRFC2253());
+                CertificateToken tsaCert = TimestampCertificateEvidenceExtractor.selectSigner(timestampToken);
+                if (tsaCert == null) {
+                    errors.add("TSA imzacı sertifikası SignerIdentifier ile belirlenemedi");
+                } else {
+                    CertificateInfo certInfo = certificateInfoExtractor.extractCertificateInfo(tsaCert);
+                    response.setTsaCertificate(certInfo);
+                    response.setTsaName(tsaCert.getSubject().getPrettyPrintRFC2253());
 
-                // Sertifika geçerlilik kontrolü
-                Date now = new Date();
-                if (now.before(tsaCert.getNotBefore()) || now.after(tsaCert.getNotAfter())) {
-                    errors.add("TSA sertifikası geçerlilik süresi dışında");
+                    // Sertifika geçerlilik kontrolü
+                    Date now = new Date();
+                    if (now.before(tsaCert.getNotBefore()) || now.after(tsaCert.getNotAfter())) {
+                        errors.add("TSA sertifikası geçerlilik süresi dışında");
+                    }
+
+                    // Güvenilir root kontrolü — birebir uyelik degil, zincir kurma.
+                    // (Detayli aciklama: KamusmRootCertificateService.isChainTrusted)
+                    boolean trusted = isCertificateTrusted(tsaCert, tsaChain);
+                    certInfo.setTrusted(trusted);
+                    if (!trusted) {
+                        warnings.add("TSA sertifikası güvenilir bir root'a zincirlenemiyor");
+                    }
+
+                    // Revocation kontrolu — online validation acikken yapilir.
+                    // Ham TSA cert'i icin DSS DiagnosticData yok, dolayisiyla
+                    // OCSPSource/CRLSource'tan direkt token cekiyor ve
+                    // RevocationInfo'ya ceviriyoruz. Onceden bu adim eksik oldugu
+                    // icin tsaCertificate.revoked her zaman default false
+                    // gorunuyordu.
+                    if (config.isOnlineValidationEnabled()) {
+                        enrichTsaRevocation(certInfo, tsaCert, tsaChain, warnings);
+                    }
+
+                    // Tum kontroller sonrasi TSA sertifikasinin nihai gecerliligi
+                    // (trusted + suresi gecerli + iptal edilmemis).
+                    certInfo.setValid(trusted && !certInfo.isExpired() && !certInfo.isRevoked());
+                    response.setCertificateChain(TimestampCertificateEvidenceExtractor.exportChain(
+                            tsaCert, tsaChain, rootCertificateService.getTrustedCertificateSource(), certInfo, certificateInfoExtractor));
                 }
-
-                // Güvenilir root kontrolü — birebir uyelik degil, zincir kurma.
-                // (Detayli aciklama: KamusmRootCertificateService.isChainTrusted)
-                boolean trusted = isCertificateTrusted(tsaCert, tsaChain);
-                certInfo.setTrusted(trusted);
-                if (!trusted) {
-                    warnings.add("TSA sertifikası güvenilir bir root'a zincirlenemiyor");
-                }
-
-                // Revocation kontrolu — online validation acikken yapilir.
-                // Ham TSA cert'i icin DSS DiagnosticData yok, dolayisiyla
-                // OCSPSource/CRLSource'tan direkt token cekiyor ve
-                // RevocationInfo'ya ceviriyoruz. Onceden bu adim eksik oldugu
-                // icin tsaCertificate.revoked her zaman default false
-                // gorunuyordu.
-                if (config.isOnlineValidationEnabled()) {
-                    enrichTsaRevocation(certInfo, tsaCert, tsaChain, warnings);
-                }
-
-                // Tum kontroller sonrasi TSA sertifikasinin nihai gecerliligi
-                // (trusted + suresi gecerli + iptal edilmemis).
-                certInfo.setValid(trusted && !certInfo.isExpired() && !certInfo.isRevoked());
             }
 
             // 5. Digest algoritması bilgisi
-            if (timestampToken.getArchiveTimestampType() != null) {
-                response.setDigestAlgorithm(timestampToken.getArchiveTimestampType().name());
+            if (timestampToken.getMessageImprint() != null && timestampToken.getMessageImprint().getAlgorithm() != null) {
+                response.setDigestAlgorithm(timestampToken.getMessageImprint().getAlgorithm().getName());
             }
 
             // 6. Message imprint'i Base64 olarak ekle
@@ -213,16 +221,12 @@ public class TimestampVerificationService {
         }
 
         try {
-            @SuppressWarnings("unchecked")
-            Collection<X509CertificateHolder> signerCerts =
-                    bcToken.getCertificates().getMatches(bcToken.getSID());
-            if (signerCerts.isEmpty()) {
-                logger.warn("Timestamp token imzaci (TSA) sertifikasini gomulu tasimiyor; "
-                        + "imza butunlugu dogrulanamadi");
+            CertificateToken signer = TimestampCertificateEvidenceExtractor.selectSigner(token);
+            if (signer == null) {
+                logger.warn("Timestamp signer cannot be identified by CMS SignerIdentifier");
                 return false;
             }
-
-            X509CertificateHolder signerCert = signerCerts.iterator().next();
+            X509CertificateHolder signerCert = new X509CertificateHolder(signer.getEncoded());
             SignerInformationVerifier verifier = new JcaSimpleSignerInfoVerifierBuilder()
                     .setProvider(BouncyCastleProvider.PROVIDER_NAME)
                     .build(signerCert);
@@ -370,19 +374,7 @@ public class TimestampVerificationService {
      * tam zincir gondermez, sira garanti degildir.
      */
     private CertificateToken findIssuerCertificate(CertificateToken tsaCert, List<CertificateToken> chain) {
-        if (tsaCert == null || chain == null || chain.isEmpty()) {
-            return null;
-        }
-        String issuerDn = tsaCert.getIssuer().getCanonical();
-        for (CertificateToken candidate : chain) {
-            if (candidate == tsaCert) {
-                continue;
-            }
-            if (issuerDn != null && issuerDn.equals(candidate.getSubject().getCanonical())) {
-                return candidate;
-            }
-        }
-        return null;
+        return TimestampCertificateEvidenceExtractor.findIssuer(tsaCert, chain, null);
     }
 
     /**

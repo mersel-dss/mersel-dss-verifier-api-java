@@ -65,7 +65,7 @@ class RetryingOCSPSourceTest {
     void retrySucceedsAfterTransientError() {
         OCSPToken token = mockToken(CertificateStatus.GOOD);
         when(delegate.getRevocationToken(cert, issuer))
-                .thenThrow(new RuntimeException("transient 503"))
+                .thenThrow(RetryingCRLSourceTest.transientFailure("transient 503"))
                 .thenReturn(token);
 
         RetryPolicy policy = new RetryPolicy(3, 100L, 1000L, 2.0d, 0.0d);
@@ -80,10 +80,10 @@ class RetryingOCSPSourceTest {
     @Test
     @DisplayName("Tum attempt'lar basarisizsa son exception caller'a firlatilir")
     void retryExhaustedRethrows() {
-        RuntimeException finalError = new RuntimeException("attempt 3 failed");
+        RuntimeException finalError = RetryingCRLSourceTest.transientFailure("attempt 3 failed");
         when(delegate.getRevocationToken(cert, issuer))
-                .thenThrow(new RuntimeException("attempt 1"))
-                .thenThrow(new RuntimeException("attempt 2"))
+                .thenThrow(RetryingCRLSourceTest.transientFailure("attempt 1"))
+                .thenThrow(RetryingCRLSourceTest.transientFailure("attempt 2"))
                 .thenThrow(finalError);
 
         RetryPolicy policy = new RetryPolicy(3, 100L, 1000L, 2.0d, 0.0d);
@@ -127,6 +127,32 @@ class RetryingOCSPSourceTest {
         RetryingOCSPSource source = new RetryingOCSPSource(delegate, policy, sleeper);
 
         assertSame(policy, source.getRetryPolicy());
+    }
+
+    @Test
+    @DisplayName("Kalici hata (HTTP 404): retry yapilmaz")
+    void permanentFailureNotRetried() {
+        RuntimeException http404 = RevocationFailureClassifierTest.dssCrlFailure(
+                new UnacceptableHttpStatusException(404, RevocationFailureClassifierTest.dssStatusMessage(404)));
+        when(delegate.getRevocationToken(cert, issuer)).thenThrow(http404);
+
+        RetryPolicy policy = new RetryPolicy(3, 100L, 1000L, 2.0d, 0.0d);
+        RetryingOCSPSource source = new RetryingOCSPSource(delegate, policy, sleeper);
+
+        assertSame(http404, assertThrows(RuntimeException.class, () -> source.getRevocationToken(cert, issuer)));
+        verify(delegate, times(1)).getRevocationToken(cert, issuer);
+    }
+
+    @Test
+    @DisplayName("Disaridan verilen siniflandirici kullanilir (retryAll -> eski davranis)")
+    void customClassifier() {
+        when(delegate.getRevocationToken(cert, issuer)).thenThrow(new RuntimeException("unclassified"));
+
+        RetryPolicy policy = new RetryPolicy(3, 100L, 1000L, 2.0d, 0.0d);
+        RetryingOCSPSource source = new RetryingOCSPSource(delegate, policy, sleeper, FailureClassifier.retryAll());
+
+        assertThrows(RuntimeException.class, () -> source.getRevocationToken(cert, issuer));
+        verify(delegate, times(3)).getRevocationToken(cert, issuer);
     }
 
     // ---- helpers -----------------------------------------------------------

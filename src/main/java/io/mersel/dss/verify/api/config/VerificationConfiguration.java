@@ -195,6 +195,42 @@ public class VerificationConfiguration {
     @Value("${verification.revocation.retry.jitter-ratio:0.2}")
     private double revocationRetryJitterRatio;
 
+    // --- Revocation fast-fail (feature flag) ---
+
+    /**
+     * Revocation fast-fail feature flag'i ({@code REVOCATION_FAST_FAIL_ENABLED}).
+     * Varsayılan kapalı: retry her hatayı yeniden dener, negatif cache ve
+     * single-flight devre dışıdır — revocation davranışı v1.0.4 ile aynıdır.
+     * Açıkken hata sınıflandırma (yalnız geçici hatalar yeniden denenir),
+     * negatif cache ve single-flight devreye girer.
+     */
+    @Value("${verification.revocation.fast-fail.enabled:false}")
+    private boolean revocationFastFailEnabled;
+
+    // --- Revocation negatif cache (basarisiz OCSP/CRL fetch'leri) ---
+
+    /**
+     * Kalici fetch hatalarinin (HTTP 4xx, bozuk cevap, protokol)
+     * negatif cache suresi (saniye). Bu surede ayni sertifika icin ag cagrisi
+     * yapilmaz, basarisiz fetch'in sonucu ({@code null}) aynen doner.
+     * <code>0</code> = negatif cache ve single-flight kapali (eski davranis).
+     */
+    @Value("${verification.revocation.failure-cache.ttl-seconds:300}")
+    private long revocationFailureCacheTtlSeconds;
+
+    /**
+     * Gecici fetch hatalarinin (timeout / 5xx sonrasi retry'lar tukenmis;
+     * retry edilmeyen DNS cozumleme hatasi)
+     * negatif cache suresi (saniye). {@link #revocationFailureCacheTtlSeconds}'i
+     * asamaz; <code>0</code> = gecici hatalar cache'lenmez.
+     */
+    @Value("${verification.revocation.failure-cache.transient-ttl-seconds:30}")
+    private long revocationFailureCacheTransientTtlSeconds;
+
+    /** Negatif cache'in maksimum kayit sayisi (OCSP ve CRL ayri). */
+    @Value("${verification.revocation.failure-cache.max-size:1000}")
+    private long revocationFailureCacheMaxSize;
+
     /**
      * GİB / TÜBİTAK Mali Mühür DER-encoded ECDSA SignatureValue'sini
      * W3C XMLDSig raw r||s formatına dönüştüren preprocessor'ın aktif/pasif kontrolü.
@@ -491,6 +527,38 @@ public class VerificationConfiguration {
 
     public void setRevocationRetryJitterRatio(double revocationRetryJitterRatio) {
         this.revocationRetryJitterRatio = revocationRetryJitterRatio;
+    }
+
+    public boolean isRevocationFastFailEnabled() {
+        return revocationFastFailEnabled;
+    }
+
+    public void setRevocationFastFailEnabled(boolean revocationFastFailEnabled) {
+        this.revocationFastFailEnabled = revocationFastFailEnabled;
+    }
+
+    public long getRevocationFailureCacheTtlSeconds() {
+        return revocationFailureCacheTtlSeconds;
+    }
+
+    public void setRevocationFailureCacheTtlSeconds(long revocationFailureCacheTtlSeconds) {
+        this.revocationFailureCacheTtlSeconds = revocationFailureCacheTtlSeconds;
+    }
+
+    public long getRevocationFailureCacheTransientTtlSeconds() {
+        return revocationFailureCacheTransientTtlSeconds;
+    }
+
+    public void setRevocationFailureCacheTransientTtlSeconds(long revocationFailureCacheTransientTtlSeconds) {
+        this.revocationFailureCacheTransientTtlSeconds = revocationFailureCacheTransientTtlSeconds;
+    }
+
+    public long getRevocationFailureCacheMaxSize() {
+        return revocationFailureCacheMaxSize;
+    }
+
+    public void setRevocationFailureCacheMaxSize(long revocationFailureCacheMaxSize) {
+        this.revocationFailureCacheMaxSize = revocationFailureCacheMaxSize;
     }
 
     public boolean isEcdsaDerPreprocessorEnabled() {

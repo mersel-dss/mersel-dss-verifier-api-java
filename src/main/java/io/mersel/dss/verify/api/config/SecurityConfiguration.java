@@ -46,7 +46,11 @@ public class SecurityConfiguration implements WebMvcConfigurer {
                     "Content-Disposition",
                     "X-Verification-Status",
                     "X-Signature-Count",
-                    "X-Signature-Valid"
+                    "X-Signature-Valid",
+                    // GET /api/v1/policy/active/xml: gövdenin revizyonu ve özeti (tarayıcı arayüzü okuyabilsin)
+                    "ETag",
+                    "X-Policy-Id",
+                    "X-Policy-Sha256"
                 )
                 .allowCredentials(false)
                 .maxAge(3600);

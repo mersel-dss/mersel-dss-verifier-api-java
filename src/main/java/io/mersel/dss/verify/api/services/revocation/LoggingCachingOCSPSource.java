@@ -5,12 +5,15 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import eu.europa.esig.dss.enumerations.CertificateStatus;
 import eu.europa.esig.dss.model.x509.CertificateToken;
+import eu.europa.esig.dss.spi.CertificateExtensionsUtils;
 import eu.europa.esig.dss.spi.x509.revocation.ocsp.OCSPSource;
 import eu.europa.esig.dss.spi.x509.revocation.ocsp.OCSPToken;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collections;
 import java.util.Date;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
@@ -43,8 +46,20 @@ import java.util.concurrent.TimeUnit;
  *   <li><b>INFO</b> — cache miss: aktif HTTP istegi atilirken ("OCSP request: ...")</li>
  *   <li><b>INFO</b> — response: status / thisUpdate / nextUpdate / sourceUrl</li>
  *   <li><b>DEBUG</b> — cache hit: HTTP atilmadi (operasyonel guruluk azaltma)</li>
- *   <li><b>WARN</b> — delegate hata firlatti: cache'lenmez, null donulur</li>
+ *   <li><b>WARN</b> — delegate hata firlatti: null donulur</li>
+ *   <li><b>INFO</b> — hata negatif cache'e alindi ("OCSP fetch failure cached for N s")</li>
+ *   <li><b>DEBUG</b> — negatif cache hit (fetch yapilmadi)</li>
  * </ul>
+ *
+ * <h3>Negatif cache + single-flight</h3>
+ * <p>{@link RevocationFailureCache} etkinse basarisiz fetch'ler (sertifika +
+ * issuer kimligi + OCSP URL'leri bazinda) kisa sure hatirlanir; bu surede
+ * ayni sertifika icin delegate cagrilmaz ve basarisiz fetch'in bugun
+ * urettigi sonucun aynisi ({@code null}) doner — DSS ayni girdiyi gorur,
+ * dogrulama karari degismez. Ayni anahtar icin eszamanli istekler tek bir
+ * fetch'i paylasir ({@link SingleFlight}). Negatif cache kapaliysa
+ * ({@code ttl=0}) akis eski davranisla birebir aynidir. {@code null} token
+ * ve {@code UNKNOWN} status hata sayilmaz; eskisi gibi cache'lenmez.</p>
  *
  * <p><strong>Thread-safety</strong>: Caffeine cache thread-safe; bu wrapper
  * stateless (cache disinda) oldugu icin Spring singleton bean olarak guvenle
@@ -58,6 +73,8 @@ public class LoggingCachingOCSPSource implements OCSPSource {
 
     private final transient OCSPSource delegate;
     private final transient Cache<String, OCSPToken> cache;
+    private final transient RevocationFailureCache failureCache;
+    private final transient SingleFlight<OCSPToken> singleFlight = new SingleFlight<>("OCSP");
     private final long defaultTtlSeconds;
 
     /**
@@ -83,8 +100,21 @@ public class LoggingCachingOCSPSource implements OCSPSource {
      */
     public LoggingCachingOCSPSource(OCSPSource delegate, long maxCacheSize, long defaultTtlSeconds,
                                     io.mersel.dss.verify.api.metrics.VerificationMetrics metrics) {
+        this(delegate, maxCacheSize, defaultTtlSeconds, metrics, null);
+    }
+
+    /**
+     * Negatif cache'li constructor.
+     *
+     * @param failureCache basarisiz fetch'ler icin negatif cache; {@code null}
+     *                     veya kapali ise eski davranis (her istek yeniden fetch)
+     */
+    public LoggingCachingOCSPSource(OCSPSource delegate, long maxCacheSize, long defaultTtlSeconds,
+                                    io.mersel.dss.verify.api.metrics.VerificationMetrics metrics,
+                                    RevocationFailureCache failureCache) {
         this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
         this.metrics = metrics;
+        this.failureCache = failureCache != null ? failureCache : RevocationFailureCache.disabled("OCSP");
         if (maxCacheSize <= 0) {
             throw new IllegalArgumentException("maxCacheSize must be > 0, was: " + maxCacheSize);
         }
@@ -97,8 +127,8 @@ public class LoggingCachingOCSPSource implements OCSPSource {
                 .expireAfter(new TokenExpiry(defaultTtlSeconds))
                 .recordStats()
                 .build();
-        logger.info("LoggingCachingOCSPSource initialized: delegate={}, maxSize={}, defaultTtlSeconds={}",
-                delegate.getClass().getSimpleName(), maxCacheSize, defaultTtlSeconds);
+        logger.info("LoggingCachingOCSPSource initialized: delegate={}, maxSize={}, defaultTtlSeconds={}, failureCache={}",
+                delegate.getClass().getSimpleName(), maxCacheSize, defaultTtlSeconds, this.failureCache);
     }
 
     @Override
@@ -112,13 +142,39 @@ public class LoggingCachingOCSPSource implements OCSPSource {
         String key = buildKey(certificateToken, issuerCertificateToken);
         OCSPToken cached = cache.getIfPresent(key);
         if (cached != null) {
-            logger.debug("OCSP cache hit: subject='{}', status={}, sourceUrl={}",
-                    safeSubject(certificateToken),
-                    cached.getStatus(),
-                    cached.getSourceURL());
+            logCacheHit(certificateToken, cached);
             return cached;
         }
 
+        if (!failureCache.isEnabled()) {
+            return fetch(key, null, null, certificateToken, issuerCertificateToken);
+        }
+
+        List<String> urls = ocspUrls(certificateToken);
+        String failureKey = key + "|" + String.join(",", urls);
+        if (isCachedFailure(failureKey, certificateToken)) {
+            return null;
+        }
+        return singleFlight.execute(key, () -> {
+            // Lider olmadan hemen once biten bir fetch cache'leri doldurmus olabilir.
+            OCSPToken raced = cache.getIfPresent(key);
+            if (raced != null) {
+                logCacheHit(certificateToken, raced);
+                return raced;
+            }
+            if (isCachedFailure(failureKey, certificateToken)) {
+                return null;
+            }
+            return fetch(key, failureKey, urls, certificateToken, issuerCertificateToken);
+        });
+    }
+
+    /**
+     * Gercek fetch + cache. {@code failureKey == null} ise negatif cache kapali
+     * (eski davranis birebir).
+     */
+    private OCSPToken fetch(String key, String failureKey, List<String> urls,
+                            CertificateToken certificateToken, CertificateToken issuerCertificateToken) {
         logger.info("OCSP request: subject='{}', issuer='{}' — cache miss, fetching from responder",
                 safeSubject(certificateToken),
                 safeSubject(issuerCertificateToken));
@@ -129,8 +185,18 @@ public class LoggingCachingOCSPSource implements OCSPSource {
             token = delegate.getRevocationToken(certificateToken, issuerCertificateToken);
         } catch (RuntimeException e) {
             recordFetch("error", fetchStartNanos);
-            logger.warn("OCSP fetch failed for subject='{}': {} (not cached, returning null)",
-                    safeSubject(certificateToken), e.getMessage());
+            RevocationFailureCache.CachedFailure remembered =
+                    failureKey == null ? null : failureCache.remember(failureKey, e);
+            if (remembered == null) {
+                logger.warn("OCSP fetch failed for subject='{}': {} (not cached, returning null)",
+                        safeSubject(certificateToken), e.getMessage());
+            } else {
+                logger.warn("OCSP fetch failed for subject='{}': {} (returning null)",
+                        safeSubject(certificateToken), e.getMessage());
+                logger.info("OCSP fetch failure cached for {} s: subject='{}', urls={}, failure={}",
+                        remembered.getTtlSeconds(), safeSubject(certificateToken),
+                        RevocationUrls.forLog(urls), remembered.getClassification());
+            }
             return null;
         }
 
@@ -163,6 +229,32 @@ public class LoggingCachingOCSPSource implements OCSPSource {
         return token;
     }
 
+    private boolean isCachedFailure(String failureKey, CertificateToken certificateToken) {
+        RevocationFailureCache.CachedFailure failure = failureCache.getIfPresent(failureKey);
+        if (failure == null) {
+            return false;
+        }
+        logger.debug("OCSP failure cache hit: subject='{}', failure={} — skipping fetch, returning null",
+                safeSubject(certificateToken), failure);
+        return true;
+    }
+
+    private void logCacheHit(CertificateToken certificateToken, OCSPToken cached) {
+        logger.debug("OCSP cache hit: subject='{}', status={}, sourceUrl={}",
+                safeSubject(certificateToken),
+                cached.getStatus(),
+                cached.getSourceURL());
+    }
+
+    private static List<String> ocspUrls(CertificateToken certificateToken) {
+        try {
+            List<String> urls = CertificateExtensionsUtils.getOCSPAccessUrls(certificateToken);
+            return urls != null ? urls : Collections.<String>emptyList();
+        } catch (RuntimeException e) {
+            return Collections.emptyList();
+        }
+    }
+
     /**
      * Gerçek fetch (cache-miss) süresi + sonucunu metrics hook'una yazar.
      * Hook null ise no-op; hata asla revocation akışını bozmaz.
@@ -192,7 +284,13 @@ public class LoggingCachingOCSPSource implements OCSPSource {
      */
     public void invalidateAll() {
         cache.invalidateAll();
+        failureCache.invalidateAll();
         logger.info("OCSP cache invalidated");
+    }
+
+    /** Negatif cache (metrics binding / test icin). */
+    public RevocationFailureCache failureCache() {
+        return failureCache;
     }
 
     /**

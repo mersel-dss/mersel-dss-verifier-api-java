@@ -12,6 +12,14 @@ import java.util.List;
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class VerificationResult {
+    private io.mersel.dss.verify.api.models.TrustEvidence trustContext;
+    public io.mersel.dss.verify.api.models.TrustEvidence getTrustContext() { return trustContext; }
+    public void setTrustContext(io.mersel.dss.verify.api.models.TrustEvidence value) { trustContext = value; }
+    /** Bu doğrulamada kullanılan etkin politika (istek başında alınan snapshot). */
+    private PolicyContext policyContext;
+    public PolicyContext getPolicyContext() { return policyContext; }
+    public void setPolicyContext(PolicyContext value) { policyContext = value; }
+
     private boolean valid;
     private String status;
     private SignatureType signatureType;

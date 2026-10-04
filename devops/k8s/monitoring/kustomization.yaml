@@ -1,0 +1,25 @@
+# =============================================================================
+# Kustomize bundle — Mersel DSS Verify API monitoring (kube-prometheus-stack)
+#
+# Kullanim:
+#   kubectl apply -k devops/k8s/monitoring/
+#
+# Service + ServiceMonitor 'general' namespace'inde, PrometheusRule 'o11y'
+# namespace'inde kalir (her dosya kendi metadata.namespace'ini tasir; burada
+# global namespace override ETMIYORUZ — bilinçli).
+#
+# DASHBOARD NOT DAHIL: Grafana dashboard ConfigMap'i bu kustomization'a
+# EKLENMEDI cunku dashboard JSON'u repo'da tek dogruluk kaynaginda
+# (devops/monitoring/grafana/dashboards/) duruyor ve kustomize varsayilan
+# guvenlik kisiti (LoadRestrictionsRootOnly) kustomization kokunun DISINDAKI
+# dosyalari configMapGenerator ile okumaya izin vermiyor. Dashboard'u
+# README'deki tek satirlik 'kubectl create configmap ... | kubectl label
+# grafana_dashboard=1' komutuyla uygulayin (JSON'u kopyalamaya gerek yok).
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - service.yaml
+  - servicemonitor.yaml
+  - prometheusrule.yaml

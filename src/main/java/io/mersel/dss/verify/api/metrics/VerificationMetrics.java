@@ -235,7 +235,9 @@ public class VerificationMetrics {
      * @param type  {@code ocsp} veya {@code crl}
      * @param event {@code retried} (bir retry tetiklendi) /
      *              {@code recovered} (retry sonrası başarı) /
-     *              {@code exhausted} (tüm denemeler bitti, hata yükseliyor)
+     *              {@code exhausted} (tüm denemeler bitti, hata yükseliyor) /
+     *              {@code permanent} (kalıcı hata — HTTP 4xx, bozuk cevap,
+     *              DNS — retry yapılmadan yükseliyor)
      */
     public void recordRevocationRetry(String type, String event) {
         if (registry == null) {

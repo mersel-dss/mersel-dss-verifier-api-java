@@ -4,12 +4,15 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import eu.europa.esig.dss.model.x509.CertificateToken;
+import eu.europa.esig.dss.spi.CertificateExtensionsUtils;
 import eu.europa.esig.dss.spi.x509.revocation.crl.CRLSource;
 import eu.europa.esig.dss.spi.x509.revocation.crl.CRLToken;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collections;
 import java.util.Date;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
@@ -38,7 +41,17 @@ import java.util.concurrent.TimeUnit;
  *   <li><b>INFO</b> — response: thisUpdate / nextUpdate / sourceUrl</li>
  *   <li><b>DEBUG</b> — cache hit</li>
  *   <li><b>WARN</b> — delegate hata firlatti</li>
+ *   <li><b>INFO</b> — hata negatif cache'e alindi ("CRL fetch failure cached for N s")</li>
+ *   <li><b>DEBUG</b> — negatif cache hit (fetch yapilmadi)</li>
  * </ul>
+ *
+ * <h3>Negatif cache + single-flight</h3>
+ * <p>{@link RevocationFailureCache} etkinse basarisiz fetch'ler (sertifika +
+ * issuer kimligi + CRL URL'leri bazinda) kisa sure hatirlanir; bu surede
+ * ayni sertifika icin delegate cagrilmaz ve basarisiz fetch'in bugun
+ * urettigi sonucun aynisi ({@code null}) doner. Ayni anahtar icin eszamanli
+ * istekler tek bir fetch'i paylasir ({@link SingleFlight}). Negatif cache
+ * kapaliysa ({@code ttl=0}) akis eski davranisla birebir aynidir.</p>
  */
 public class LoggingCachingCRLSource implements CRLSource {
 
@@ -48,6 +61,8 @@ public class LoggingCachingCRLSource implements CRLSource {
 
     private final transient CRLSource delegate;
     private final transient Cache<String, CRLToken> cache;
+    private final transient RevocationFailureCache failureCache;
+    private final transient SingleFlight<CRLToken> singleFlight = new SingleFlight<>("CRL");
 
     /** İş metrikleri için opsiyonel hook; {@code null} olabilir. */
     private final transient io.mersel.dss.verify.api.metrics.VerificationMetrics metrics;
@@ -58,8 +73,21 @@ public class LoggingCachingCRLSource implements CRLSource {
 
     public LoggingCachingCRLSource(CRLSource delegate, long maxCacheSize, long defaultTtlSeconds,
                                    io.mersel.dss.verify.api.metrics.VerificationMetrics metrics) {
+        this(delegate, maxCacheSize, defaultTtlSeconds, metrics, null);
+    }
+
+    /**
+     * Negatif cache'li constructor.
+     *
+     * @param failureCache basarisiz fetch'ler icin negatif cache; {@code null}
+     *                     veya kapali ise eski davranis (her istek yeniden fetch)
+     */
+    public LoggingCachingCRLSource(CRLSource delegate, long maxCacheSize, long defaultTtlSeconds,
+                                   io.mersel.dss.verify.api.metrics.VerificationMetrics metrics,
+                                   RevocationFailureCache failureCache) {
         this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
         this.metrics = metrics;
+        this.failureCache = failureCache != null ? failureCache : RevocationFailureCache.disabled("CRL");
         if (maxCacheSize <= 0) {
             throw new IllegalArgumentException("maxCacheSize must be > 0, was: " + maxCacheSize);
         }
@@ -71,8 +99,8 @@ public class LoggingCachingCRLSource implements CRLSource {
                 .expireAfter(new TokenExpiry(defaultTtlSeconds))
                 .recordStats()
                 .build();
-        logger.info("LoggingCachingCRLSource initialized: delegate={}, maxSize={}, defaultTtlSeconds={}",
-                delegate.getClass().getSimpleName(), maxCacheSize, defaultTtlSeconds);
+        logger.info("LoggingCachingCRLSource initialized: delegate={}, maxSize={}, defaultTtlSeconds={}, failureCache={}",
+                delegate.getClass().getSimpleName(), maxCacheSize, defaultTtlSeconds, this.failureCache);
     }
 
     @Override
@@ -85,13 +113,39 @@ public class LoggingCachingCRLSource implements CRLSource {
         String key = buildKey(certificateToken, issuerCertificateToken);
         CRLToken cached = cache.getIfPresent(key);
         if (cached != null) {
-            logger.debug("CRL cache hit: subject='{}', status={}, sourceUrl={}",
-                    safeSubject(certificateToken),
-                    cached.getStatus(),
-                    cached.getSourceURL());
+            logCacheHit(certificateToken, cached);
             return cached;
         }
 
+        if (!failureCache.isEnabled()) {
+            return fetch(key, null, null, certificateToken, issuerCertificateToken);
+        }
+
+        List<String> urls = crlUrls(certificateToken);
+        String failureKey = key + "|" + String.join(",", urls);
+        if (isCachedFailure(failureKey, certificateToken)) {
+            return null;
+        }
+        return singleFlight.execute(key, () -> {
+            // Lider olmadan hemen once biten bir fetch cache'leri doldurmus olabilir.
+            CRLToken raced = cache.getIfPresent(key);
+            if (raced != null) {
+                logCacheHit(certificateToken, raced);
+                return raced;
+            }
+            if (isCachedFailure(failureKey, certificateToken)) {
+                return null;
+            }
+            return fetch(key, failureKey, urls, certificateToken, issuerCertificateToken);
+        });
+    }
+
+    /**
+     * Gercek fetch + cache. {@code failureKey == null} ise negatif cache kapali
+     * (eski davranis birebir).
+     */
+    private CRLToken fetch(String key, String failureKey, List<String> urls,
+                           CertificateToken certificateToken, CertificateToken issuerCertificateToken) {
         logger.info("CRL request: subject='{}', issuer='{}' — cache miss, fetching CRL",
                 safeSubject(certificateToken),
                 safeSubject(issuerCertificateToken));
@@ -102,8 +156,18 @@ public class LoggingCachingCRLSource implements CRLSource {
             token = delegate.getRevocationToken(certificateToken, issuerCertificateToken);
         } catch (RuntimeException e) {
             recordFetch("error", fetchStartNanos);
-            logger.warn("CRL fetch failed for subject='{}': {} (not cached, returning null)",
-                    safeSubject(certificateToken), e.getMessage());
+            RevocationFailureCache.CachedFailure remembered =
+                    failureKey == null ? null : failureCache.remember(failureKey, e);
+            if (remembered == null) {
+                logger.warn("CRL fetch failed for subject='{}': {} (not cached, returning null)",
+                        safeSubject(certificateToken), e.getMessage());
+            } else {
+                logger.warn("CRL fetch failed for subject='{}': {} (returning null)",
+                        safeSubject(certificateToken), e.getMessage());
+                logger.info("CRL fetch failure cached for {} s: subject='{}', urls={}, failure={}",
+                        remembered.getTtlSeconds(), safeSubject(certificateToken),
+                        RevocationUrls.forLog(urls), remembered.getClassification());
+            }
             return null;
         }
 
@@ -125,6 +189,32 @@ public class LoggingCachingCRLSource implements CRLSource {
         return token;
     }
 
+    private boolean isCachedFailure(String failureKey, CertificateToken certificateToken) {
+        RevocationFailureCache.CachedFailure failure = failureCache.getIfPresent(failureKey);
+        if (failure == null) {
+            return false;
+        }
+        logger.debug("CRL failure cache hit: subject='{}', failure={} — skipping fetch, returning null",
+                safeSubject(certificateToken), failure);
+        return true;
+    }
+
+    private void logCacheHit(CertificateToken certificateToken, CRLToken cached) {
+        logger.debug("CRL cache hit: subject='{}', status={}, sourceUrl={}",
+                safeSubject(certificateToken),
+                cached.getStatus(),
+                cached.getSourceURL());
+    }
+
+    private static List<String> crlUrls(CertificateToken certificateToken) {
+        try {
+            List<String> urls = CertificateExtensionsUtils.getCRLAccessUrls(certificateToken);
+            return urls != null ? urls : Collections.<String>emptyList();
+        } catch (RuntimeException e) {
+            return Collections.emptyList();
+        }
+    }
+
     private void recordFetch(String outcome, long startNanos) {
         if (metrics == null) {
             return;
@@ -142,7 +232,13 @@ public class LoggingCachingCRLSource implements CRLSource {
 
     public void invalidateAll() {
         cache.invalidateAll();
+        failureCache.invalidateAll();
         logger.info("CRL cache invalidated");
+    }
+
+    /** Negatif cache (metrics binding / test icin). */
+    public RevocationFailureCache failureCache() {
+        return failureCache;
     }
 
     /**

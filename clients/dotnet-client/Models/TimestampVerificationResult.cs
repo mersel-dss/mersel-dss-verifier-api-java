@@ -33,7 +33,7 @@ public sealed class TimestampVerificationResult
     [JsonPropertyName("digestAlgorithm")]
     public string? DigestAlgorithm { get; set; }
 
-    /// <summary>Message imprint hex (token içindeki <c>messageImprint</c>).</summary>
+    /// <summary>Message imprint Base64 (token içindeki <c>messageImprint</c>).</summary>
     [JsonPropertyName("messageImprint")]
     public string? MessageImprint { get; set; }
 

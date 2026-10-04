@@ -109,10 +109,18 @@ sum by (type) (rate(mdss_revocation_fetch_duration_seconds_count{application="me
 # Retry tükenmesi (KamuSM flaky/down sinyali)
 sum by (type) (rate(mdss_revocation_retry_total{application="mersel-dss-verify-api",event="exhausted"}[5m]))
 
+# Kalıcı hata — retry yapılmadan biten fetch (HTTP 4xx, bozuk cevap, DNS)
+# (yalnız REVOCATION_FAST_FAIL_ENABLED=true iken üretilir)
+sum by (type) (rate(mdss_revocation_retry_total{application="mersel-dss-verify-api",event="permanent"}[5m]))
+
+# Negatif cache: ağ çağrısı yapılmadan dönülen cache'li OCSP/CRL hataları
+# (yalnız REVOCATION_FAST_FAIL_ENABLED=true iken üretilir)
+sum by (cache) (rate(cache_gets_total{application="mersel-dss-verify-api",cache=~"mersel.revocation.(ocsp|crl).failure",result="hit"}[5m]))
+
 # AIA (ara CA) fetch latency p95
 histogram_quantile(0.95, sum by (le) (rate(mdss_aia_fetch_duration_seconds_bucket{application="mersel-dss-verify-api"}[5m])))
 
-# Cache hit-rate (ocsp/crl/aia)
+# Cache hit-rate (ocsp/crl/aia; negatif cache'ler: *.failure)
 sum by (cache) (rate(cache_gets_total{application="mersel-dss-verify-api",result="hit"}[5m]))
   / clamp_min(sum by (cache) (rate(cache_gets_total{application="mersel-dss-verify-api"}[5m])), 0.001)
 

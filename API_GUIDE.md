@@ -145,6 +145,98 @@ POST /api/v1/verify/pades
 POST /api/v1/verify/cades
 ```
 
+### 4. Etkin Doğrulama Politikası
+
+İmza doğrulamasında kullanılan DSS politikası çalışma anında okunup
+değiştirilebilir. Etkinleştirme **global** (sonraki tüm imza doğrulamaları) ve
+**bellek içidir** (yeniden başlatma `dss.policy.profile` / `dss.policy.path`
+yapılandırmasına döner). POST bir feature flag arkasındadır: yalnız
+`POLICY_ACTIVATION_ENABLED=true` (`dss.policy.activation-enabled`, varsayılan
+`false`) iken açıktır; evaluation profili veya `REQUEST_TRUST_ENABLED` açmaz.
+
+> **UYARI:** Prod ortamında kesinlikle kullanmayın. Politika etkinleştirme
+> yalnız TÜBİTAK Uyum Değerlendirme sürecindeki deployment'lar için
+> geliştirilmiştir.
+
+```bash
+GET  /api/v1/policy/active
+GET  /api/v1/policy/active/xml   # etkin politikanın XML'i (okuma her zaman açık)
+POST /api/v1/policy/active   # multipart/form-data
+```
+
+| Alan | Açıklama |
+|------|----------|
+| `mode` | `BUILT_IN`, `CUSTOM_XML` veya `CONFIGURED` (yapılandırmaya dönüş) |
+| `profile` | `signer-strict` \| `strict` — yalnız ve zorunlu olarak `BUILT_IN` ile |
+| `policyXml` | Politika XML dosyası — yalnız ve zorunlu olarak `CUSTOM_XML` ile (≤ 1 MiB, `POLICY_MAX_BYTES`) |
+| `policyName` | `CUSTOM_XML` için görünen ad (opsiyonel, ≤ 120 karakter; varsayılan "Özel politika") |
+| `expectedPolicyId` | Zorunlu; GET'ten alınan güncel `policyId` |
+
+```bash
+ID=$(curl -s http://localhost:8086/api/v1/policy/active | jq -r .policyId)
+curl -X POST http://localhost:8086/api/v1/policy/active \
+  -F "mode=CUSTOM_XML" -F "policyXml=@kurum-politikasi.xml" \
+  -F "policyName=Kurum politikası" -F "expectedPolicyId=$ID"
+```
+
+Yanıt (`ActivePolicy`):
+```json
+{
+  "policyId": "30a90a62-580e-4cfd-9e7e-82349b5b9056:2",
+  "profile": "custom",
+  "source": "CUSTOM_XML",
+  "origin": "API",
+  "name": "Kurum politikası",
+  "sha256": "8c7bf4912097a7e13fab01906e2b719cdd43a4c32f4301ae0f6390066e859309",
+  "activatedAt": "2026-10-03T21:39:14.827Z",
+  "fallbackApplied": false,
+  "activationEnabled": true
+}
+```
+
+Özel XML; DOCTYPE/ENTITY içermemeli (XXE-güvenli ayrıştırma), iyi
+biçimlendirilmiş olmalı ve DSS `ConstraintsParameters` XSD doğrulamasıyla
+yüklenebilmelidir. Hatalar: `400 INVALID_POLICY`, `403 POLICY_ACTIVATION_DISABLED`,
+`409 CONFLICT` (eski `expectedPolicyId`), `503 POLICY_UNAVAILABLE` (yapılandırmadaki
+`dss.policy.path` yüklenemiyor; gövdedeki `policyId` ile `BUILT_IN` / `CUSTOM_XML` /
+`CONFIGURED` etkinleştirilerek kurtarılır). Ayrıntı: [docs/policy-activation.md](docs/policy-activation.md).
+
+#### Etkin politikanın XML'i
+
+`GET /api/v1/policy/active/xml`, sonraki imza doğrulamalarının DSS'e verdiği XML'in
+byte'larını yeniden kodlamadan döner (yerleşik profil dosyası, arayüzden yüklenen
+özel XML veya `dss.policy.path`). Gövdenin SHA-256'sı `GET /api/v1/policy/active`
+yanıtındaki `sha256` ile aynıdır. Okuma `dss.policy.activation-enabled`'dan
+bağımsızdır; yanıtta sunucu yolu yer almaz.
+
+| Başlık | Değer |
+|--------|-------|
+| `Content-Type` | `application/xml;charset=UTF-8` (charset belgenin kendi kodlamasıdır: BOM, yoksa XML bildirimindeki `encoding`, yoksa UTF-8) |
+| `X-Policy-Id` | Gövdenin ait olduğu `policyId` |
+| `X-Policy-Sha256` | Gövdenin SHA-256'sı (küçük harf hex) |
+| `ETag` | `"<sha256>"` |
+| `Cache-Control` | `no-store` |
+| `Content-Disposition` | `inline; filename="…"` — yerleşik: `kamusm-signer-strict-constraint.xml` / `kamusm-strict-constraint.xml`; özel XML: ASCII'ye indirgenmiş `policyName` (örn. `Mersel-KamuSM-Signer-Strict-Policy.xml`), ad yoksa ve `dss.policy.path` için `active-policy.xml` |
+
+Gövde ve başlıklar aynı değişmez snapshot'tan gelir; eşzamanlı bir etkinleştirme
+kimlik ile içeriği karıştırmaz. Yapılandırmadaki `dss.policy.path` yüklenemiyorsa
+`GET /api/v1/policy/active` ile aynı `503 POLICY_UNAVAILABLE` JSON gövdesi döner
+(`Accept: application/xml` gönderilse de). CORS `X-Policy-Id`, `X-Policy-Sha256`,
+`ETag` ve `Content-Disposition` başlıklarını tarayıcıya açar.
+
+Düzenleme: XML'i okuyun, `X-Policy-Id`'yi saklayın, düzenlenen dosyayı
+`mode=CUSTOM_XML` ve `expectedPolicyId=<X-Policy-Id>` ile POST edin. Arada başka bir
+politika etkinleştirildiyse kayıt `409 CONFLICT` ile reddedilir (üzerine yazılmaz).
+
+```bash
+curl -s -D basliklar.txt -o etkin-politika.xml http://localhost:8086/api/v1/policy/active/xml
+shasum -a 256 etkin-politika.xml   # X-Policy-Sha256 ile aynı
+```
+
+`GET /api/v1/info` → `verificationPolicy` (`profile`, `source`, `fallbackApplied`)
+etkin politikayı gösterir; `policyCapabilities` = `{activationSupported, activationEnabled, maxBytes, contentAvailable}`
+(`contentAvailable: true` → `GET /api/v1/policy/active/xml` mevcut).
+
 ## Doğrulama Seviyeleri
 
 ### SIMPLE (Basit)
@@ -243,7 +335,10 @@ Online validation aktif olduğunda:
   signatureCount: number,      // İmza sayısı
   signatures: SignatureInfo[], // İmza detayları
   errors: string[],           // Genel hatalar
-  warnings: string[]          // Genel uyarılar
+  warnings: string[],         // Genel uyarılar
+  policyContext: {            // Bu doğrulamada kullanılan politika (istek başı snapshot)
+    policyId: string, profile: string, source: string, name: string, sha256: string
+  }
 }
 ```
 
@@ -282,6 +377,7 @@ Online validation aktif olduğunda:
 ### HTTP Status Codes
 - `200 OK`: Doğrulama tamamlandı (sonuç valid veya invalid olabilir)
 - `400 Bad Request`: Geçersiz istek (eksik parametre, hatalı dosya vb.)
+- `403 Forbidden` / `409 Conflict` / `503 Service Unavailable`: Politika etkinleştirme (bkz. "Etkin Doğrulama Politikası")
 - `500 Internal Server Error`: Sunucu hatası
 
 ### Örnek Hata Yanıtı

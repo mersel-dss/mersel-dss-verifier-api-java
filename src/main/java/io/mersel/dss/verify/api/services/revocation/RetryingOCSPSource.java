@@ -24,9 +24,13 @@ import java.util.Objects;
  * <ul>
  *   <li>Delegate {@code null} donerse retry YAPILMAZ — bu "responder
  *       cevap verdi ama token uretemedi" anlami tasir (transient degil).</li>
- *   <li>Delegate {@code RuntimeException} firlatirsa policy'ye gore retry'a
- *       girilir. Tum attempt'lar tukendiginde son exception caller'a
- *       firlatilir; caller (genellikle {@code LoggingCachingOCSPSource})
+ *   <li>Delegate {@code RuntimeException} firlatirsa hata
+ *       {@link RevocationFailureClassifier} ile siniflandirilir. <b>Gecici</b>
+ *       hatalarda (timeout, baglanti reset/reddi, HTTP 408/425/429/5xx, OCSP
+ *       TRY_LATER) policy'ye gore retry'a girilir; <b>kalici</b> hatalar
+ *       (HTTP 4xx, bozuk cevap, desteklenmeyen protokol) ve DNS hatasi
+ *       yeniden denenmez. Tum attempt'lar tukendiginde (veya kalici hatada hemen)
+ *       son exception caller'a firlatilir; caller (genellikle {@code LoggingCachingOCSPSource})
  *       WARN'lar ve null doner -> DSS strict policy'sinde imzayi
  *       INDETERMINATE / NO_REVOCATION_DATA olarak isaretler.</li>
  *   <li>{@code null} cert veya issuer girisi: delegate hi&ccedil; cagrilmaz.
@@ -55,18 +59,31 @@ public class RetryingOCSPSource implements OCSPSource {
      * Test constructor — caller'in {@link Sleeper}'i mocklamasina izin verir.
      */
     public RetryingOCSPSource(OCSPSource delegate, RetryPolicy policy, Sleeper sleeper) {
+        this(delegate, policy, sleeper, RevocationFailureClassifier.INSTANCE);
+    }
+
+    /**
+     * Siniflandiriciyi da disaridan alan constructor (test / ozel wiring).
+     */
+    public RetryingOCSPSource(OCSPSource delegate, RetryPolicy policy, Sleeper sleeper,
+                              FailureClassifier classifier) {
         this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
-        this.retryExecutor = new RetryExecutor(policy, sleeper);
+        this.retryExecutor = new RetryExecutor(policy, sleeper, null, null, classifier);
     }
 
     /**
      * Metrics-aware production constructor — retry olaylarini
      * {@code mdss_revocation_retry_total{type="ocsp"}} sayacina yazar.
+     *
+     * @param classifier fast-fail kapaliyken {@link FailureClassifier#retryAll()}
+     *                   (her hata yeniden denenir), acikken
+     *                   {@link RevocationFailureClassifier#INSTANCE}
      */
     public RetryingOCSPSource(OCSPSource delegate, RetryPolicy policy,
-                              io.mersel.dss.verify.api.metrics.VerificationMetrics metrics) {
+                              io.mersel.dss.verify.api.metrics.VerificationMetrics metrics,
+                              FailureClassifier classifier) {
         this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
-        this.retryExecutor = new RetryExecutor(policy, Sleeper.threadSleep(), metrics, "ocsp");
+        this.retryExecutor = new RetryExecutor(policy, Sleeper.threadSleep(), metrics, "ocsp", classifier);
     }
 
     @Override

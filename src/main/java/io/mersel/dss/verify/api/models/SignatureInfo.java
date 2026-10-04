@@ -12,6 +12,14 @@ import java.util.List;
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class SignatureInfo {
+    /** Additive DSS evidence for inspection. Relationships and references originate from the validation diagnostic report, not client XML parsing. */
+    private String parentSignatureId;
+    private Boolean counterSignature;
+    private List<String> counterSignatureIds;
+    private List<TimestampInfo> timestamps;
+    private List<SignedReferenceInfo> signedReferences;
+    private List<VerificationRecommendation> recommendations;
+
     private String signatureId;
     private boolean valid;
     private String signatureFormat;
@@ -392,5 +400,22 @@ public class SignatureInfo {
     public void setAppliedRejections(List<AppliedRejection> appliedRejections) {
         this.appliedRejections = appliedRejections;
     }
-}
 
+    public String getParentSignatureId() { return parentSignatureId; }
+    public void setParentSignatureId(String parentSignatureId) { this.parentSignatureId = parentSignatureId; }
+
+    public Boolean getCounterSignature() { return counterSignature; }
+    public void setCounterSignature(Boolean counterSignature) { this.counterSignature = counterSignature; }
+
+    public List<String> getCounterSignatureIds() { return counterSignatureIds; }
+    public void setCounterSignatureIds(List<String> counterSignatureIds) { this.counterSignatureIds = counterSignatureIds; }
+
+    public List<TimestampInfo> getTimestamps() { return timestamps; }
+    public void setTimestamps(List<TimestampInfo> timestamps) { this.timestamps = timestamps; }
+
+    public List<SignedReferenceInfo> getSignedReferences() { return signedReferences; }
+    public void setSignedReferences(List<SignedReferenceInfo> signedReferences) { this.signedReferences = signedReferences; }
+
+    public List<VerificationRecommendation> getRecommendations() { return recommendations; }
+    public void setRecommendations(List<VerificationRecommendation> recommendations) { this.recommendations = recommendations; }
+}

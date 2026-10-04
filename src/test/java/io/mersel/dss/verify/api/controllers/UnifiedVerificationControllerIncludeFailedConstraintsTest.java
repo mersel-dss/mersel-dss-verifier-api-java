@@ -74,6 +74,8 @@ class UnifiedVerificationControllerIncludeFailedConstraintsTest {
         ReflectionTestUtils.setField(
                 controller, "advancedTimestampVerificationService", timestampService);
 
+        ReflectionTestUtils.setField(controller, "requestTrustFactory",
+                new io.mersel.dss.verify.api.services.certificate.RequestTrustFactory(false));
         mockMvc = MockMvcBuilders.standaloneSetup(controller).build();
     }
 

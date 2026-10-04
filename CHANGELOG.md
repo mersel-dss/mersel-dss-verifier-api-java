@@ -7,6 +7,191 @@ ve bu proje [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) kul
 
 ## [Unreleased]
 
+> **Canlı ortam notu:** Bu sürümün yeni davranışları üç feature flag
+> arkasındadır ve üçü de varsayılan olarak **kapalıdır**:
+> `POLICY_ACTIVATION_ENABLED`, `REQUEST_TRUST_ENABLED` (ayrıca `evaluation`
+> profili) ve `REVOCATION_FAST_FAIL_ENABLED`. Bu ENV'lerin verilmediği
+> ortamlarda doğrulama kararları ve revocation davranışı v1.0.4 ile aynıdır;
+> yanıtlara yalnız yeni alanlar eklenir ve `timestampInfo.valid`'in anlamı
+> değişir (bkz. "Changed").
+
+### Added
+- **Çalışma anında doğrulama politikası etkinleştirme** —
+  `GET/POST /api/v1/policy/active` (bkz. [docs/policy-activation.md](docs/policy-activation.md)).
+  `mode=BUILT_IN` (`signer-strict`|`strict`), `mode=CUSTOM_XML` (yüklenen XML;
+  opsiyonel `policyName`) veya `mode=CONFIGURED` (başlangıç yapılandırmasına
+  dönüş). Etkinleştirme global (sonraki tüm imza doğrulamaları) ve bellek içidir;
+  yeniden başlatma `dss.policy.path` / `dss.policy.profile`'a döner. Her istek
+  güncel `expectedPolicyId` ister (eskiyse `409 CONFLICT`); `policyId`
+  örneğe özgü revizyon kimliğidir. Özel XML boyut sınırından (`dss.policy.max-bytes`,
+  `POLICY_MAX_BYTES`, varsayılan 1 MiB) geçmeli, DOCTYPE/ENTITY içermemeli
+  (XXE-güvenli ayrıştırma), iyi biçimlendirilmiş olmalı ve doğrulamanın kullandığı
+  DSS API'siyle (`ValidationPolicyLoader`, `ConstraintsParameters` XSD) yüklenmeli;
+  aksi halde `400 INVALID_POLICY`. Etkinleştirmeler INFO seviyesinde yalnız
+  policyId/profile/source/origin/name/sha256 ile loglanır.
+  **Feature flag:** POST yalnız `POLICY_ACTIVATION_ENABLED=true`
+  (`dss.policy.activation-enabled`, varsayılan `false`) ile açılır; evaluation
+  profili veya `REQUEST_TRUST_ENABLED` açmaz. Kapalıyken
+  `403 POLICY_ACTIVATION_DISABLED` döner, açıkken başlangıçta WARN loglanır.
+  **Prod ortamında kesinlikle kullanmayın** — bu özellik yalnız TÜBİTAK Uyum
+  Değerlendirme sürecindeki deployment'lar için geliştirilmiştir.
+- **`policyContext`** — imza doğrulama yanıtları kullanılan politikayı
+  (`policyId`, `profile`, `source`, `name`, `sha256`) bildirir. Politika istek
+  başında tek bir değişmez snapshot olarak okunur; DSS'e verilen XML ile
+  `policyContext` aynı snapshot'tan gelir, eşzamanlı etkinleştirme bir isteğin
+  politikasını karıştırmaz.
+- **`/api/v1/info` → `policyCapabilities`** (`activationSupported`,
+  `activationEnabled`, `maxBytes`). `verificationPolicy` aynı şekli korur, artık
+  **etkin** politikayı gösterir.
+- **Yüklenemeyen yapılandırma politikasından kurtarma** — explicit
+  `dss.policy.path` yüklenemezken `GET /api/v1/policy/active`'in
+  `503 POLICY_UNAVAILABLE` gövdesi artık güncel `policyId` ve
+  `activationEnabled` alanlarını da taşır (yapılandırma yolu yine yazılmaz).
+  İstemci bu `policyId`'yi `expectedPolicyId` olarak gönderip `BUILT_IN` veya
+  `CUSTOM_XML` etkinleştirebilir ya da düzeltilmiş dosyayı `CONFIGURED` ile
+  yükleyebilir (dosya hâlâ bozuksa `503`, durum değişmez). O ana kadar imza
+  doğrulamaları fail-fast kalır; sessiz fallback yok. Dosya sunucuda
+  kendiliğinden düzelip ilk istekte yüklenirse yeni bir `policyId` alır, böylece
+  hata durumunu görmüş istemcinin bayat isteği `409 CONFLICT` ile reddedilir.
+  Etkin bir politika varken başarısız `CONFIGURED` dönüşü de `503` (güncel
+  `policyId` ile) döner ve etkin politikayı korur.
+- **Etkin politikanın XML içeriği** — `GET /api/v1/policy/active/xml`, DSS'e
+  verilen politika XML'ini (yerleşik profil, arayüzden yüklenen özel XML veya
+  `dss.policy.path`) yeniden kodlamadan döner; gövdenin SHA-256'sı etkin
+  politikanın `sha256`'sıdır. Başlıklar: `X-Policy-Id`, `X-Policy-Sha256`,
+  `ETag: "<sha256>"`, `Cache-Control: no-store`, `Content-Type:
+  application/xml;charset=UTF-8` (charset belgenin kendi kodlaması),
+  `Content-Disposition: inline; filename="…"` (yerleşik profil dosya adı,
+  ASCII'ye indirgenmiş `policyName` veya `active-policy.xml`; sunucu yolu asla) ve
+  `Content-Security-Policy: default-src 'none'; sandbox`. Gövde ve başlıklar tek
+  bir snapshot'tan üretilir. Okuma `dss.policy.activation-enabled`'dan bağımsızdır;
+  hata durumunda `GET /api/v1/policy/active` ile aynı `503 POLICY_UNAVAILABLE`
+  (politika hata yanıtları `Accept`'ten bağımsız olarak `application/json`).
+  Arayüz XML'i okuyup düzenleyerek `mode=CUSTOM_XML` +
+  `expectedPolicyId=<X-Policy-Id>` ile kaydedebilir. `/api/v1/info`
+  `policyCapabilities.contentAvailable: true` ile bildirir; CORS `ETag`,
+  `X-Policy-Id` ve `X-Policy-Sha256` başlıklarını tarayıcıya açar.
+- **İstek bazında ve global güven kökü** (bkz. [docs/request-trust.md](docs/request-trust.md)) —
+  tüm verify uç noktalarına opsiyonel `trustMode` (`SERVER` varsayılan |
+  `CUSTOM`), `trustedCertificates` (X.509 DER/PEM; en fazla 100 sertifika /
+  1 MiB) ve `expectedTrustId` parametreleri eklendi; `CUSTOM` yalnız o isteğin
+  güven köklerini belirler. `GET /api/v1/trust/active` etkin kök kümesini
+  (DER SHA-256, subject, issuer, seri no) döner. `POST /api/v1/trust/active`
+  (`mode=CUSTOM|SERVER`, `expectedTrustId`, tekrarlanabilir `retainSha256` ve
+  `trustedCertificates`) kök kümesini global olarak değiştirir; bayat
+  `expectedTrustId` `409 TRUST_CHANGED` döner.
+  **Feature flag:** `REQUEST_TRUST_ENABLED=true`
+  (`verification.request-trust.enabled`, varsayılan `false`) veya `evaluation`
+  profili ile açılır. Kapalıyken `trustMode=CUSTOM` ve POST `400` döner;
+  `SERVER` modu v1.0.4 ile aynı kökleri kullanır. **Prod ortamında
+  kullanmayın** — TÜBİTAK Uyum Değerlendirme sürecindeki izole deployment'lar
+  için geliştirilmiştir.
+- **`trustContext`** — imza ve zaman damgası doğrulama yanıtları kullanılan
+  kök kümesini (`mode`, `activeTrustId`, kök özetleri, `snapshotSha256`)
+  bildirir. Her istek kök kümesinin değişmez bir kopyasıyla çalışır; eşzamanlı
+  bir kök değişimi devam eden isteği etkilemez.
+- **`evaluation` Spring profili** (`application-evaluation.properties`) —
+  `REQUEST_TRUST_ENABLED`'ı varsayılan olarak açar ve INVALID imza
+  bildirimlerini kapatır. Politika etkinleştirmeyi ve revocation fast-fail'i
+  açmaz.
+- **`/api/v1/info` → `trustCapabilities`** (`requestTrustEnabled`,
+  `activeTrustSupported`, `contractVersion`, `serverResolver`,
+  `onlineValidationEnabled`, `maxCertificates`, `maxBytes`) ve
+  **`runtimeProfiles`**.
+- **Sertifika, imza ve zaman damgası kanıtları** (bkz.
+  [docs/certificate-evidence-contract.md](docs/certificate-evidence-contract.md)) —
+  `CertificateInfo`: `certificateBase64` (DER), `sha256Fingerprint`,
+  `sha1Fingerprint`, `certificateId`, `issuerCertificateId`, `keyUsages`,
+  `extendedKeyUsages`, `certificatePolicyOids`, kritik/kritik olmayan uzantı
+  OID'leri, `subjectAlternativeNames`, `certificateAuthority`,
+  `basicConstraints`. `SignatureInfo`: tüm zaman damgaları `timestamps[]`
+  (`timestampInfo` ilkinin takma adı olarak korunur), `signedReferences`,
+  `parentSignatureId`, `counterSignature`, `counterSignatureIds`.
+  `TimestampInfo`: `timestampId`, `indication`, `subIndication`,
+  `messageImprintDataFound`, `messageImprintDataIntact`, `tsaCertificate`,
+  `certificateChain`; `messageImprint` (Base64), `digestAlgorithm` ve
+  `serialNumber` artık doldurulur. `/api/v1/verify/timestamp` yanıtına
+  `certificateChain` eklendi. DSS sertifika ve zaman damgası ham verisini dışa
+  aktarır (`TokenExtractionStrategy.EXTRACT_CERTIFICATES_AND_TIMESTAMPS`).
+  Alanlar yalnız eklenmiştir; yanıt (ve webhook gövdesi) sertifika başına
+  ~2-3 KB büyür.
+- **`recommendations`** — imza başına bilgilendirici öneri kodları (ör.
+  `ARCHIVE_REQUIRED_REVOCATION_EVIDENCE`, `TIMESTAMP_VALIDATION_INCOMPLETE`,
+  `REVOCATION_EVIDENCE_MISSING`). Doğrulama kararını asla değiştirmez.
+- **Kubernetes izleme manifestleri** — `devops/k8s/monitoring/` (metrics
+  Service, ServiceMonitor, PrometheusRule, probe patch; kube-prometheus-stack).
+- **Revocation fast-fail feature flag'i** — `verification.revocation.fast-fail.enabled`
+  (`REVOCATION_FAST_FAIL_ENABLED`), varsayılan **kapalı**. Kapalıyken revocation
+  davranışı v1.0.4 ile birebir aynıdır (her hata yeniden denenir, hata
+  hatırlanmaz). Açıkken aşağıdaki negatif cache, single-flight ve kalıcı
+  hataların yeniden denenmemesi birlikte devreye girer; KamuSM test deposunun
+  kalıcı HTTP 400 döndüğü TÜBİTAK Uyum Değerlendirme / test deployment'ları
+  için geliştirilmiştir.
+- **Revocation negatif cache + single-flight** (yalnız fast-fail açıkken) —
+  başarısız OCSP/CRL fetch'leri
+  (sertifika + issuer + dağıtım noktası/responder URL'leri bazında) kısa süre
+  hatırlanır; bu sürede aynı sertifika için ağa çıkılmaz ve başarısız fetch'in
+  ürettiği sonucun aynısı (`null` token) döner. Takas: responder TTL içinde
+  toparlanırsa o sertifika için TTL dolana kadar "revocation verisi yok" kalır.
+  Kalıcı hatalar `verification.revocation.failure-cache.ttl-seconds`
+  (`REVOCATION_FAILURE_CACHE_TTL_SECONDS`, varsayılan 300 s; `0` = kapalı),
+  geçici hatalar `...failure-cache.transient-ttl-seconds`
+  (`REVOCATION_FAILURE_CACHE_TRANSIENT_TTL_SECONDS`, varsayılan 30 s) kadar
+  tutulur; boyut `...failure-cache.max-size` (`REVOCATION_FAILURE_CACHE_MAX_SIZE`,
+  varsayılan 1000, OCSP/CRL ayrı). Aynı sertifika için eşzamanlı istekler tek
+  fetch'i paylaşır. İlk cache'lemede INFO (`CRL fetch failure cached for N s`),
+  cache'ten dönüşte DEBUG log; metrikler `cache_*{cache="mersel.revocation.(ocsp|crl).failure"}`.
+
+### Changed
+- **`signatures[].timestampInfo.valid` (ve `timestamps[].valid`) anlamı** —
+  önce yalnız message imprint'in bulunup sağlam olduğunu gösteriyordu; artık
+  DSS'in o zaman damgası için verdiği `PASSED`/`TOTAL_PASSED` kararını gösterir
+  (TSA imzası, TSA zinciri, EKU ve politika kuralları dahil). Değer yalnız
+  `true` → `false` yönünde değişebilir: imprint sağlam ama DSS zaman damgasını
+  geçirmediğinde (ör. TSA zinciri güvenilir köke bağlanmıyor). Normal KamuSM
+  zaman damgalarında değer değişmez. Eski anlam `messageImprintDataFound` +
+  `messageImprintDataIntact` alanlarındadır; `INDETERMINATE`/`FAILED` ayrımı
+  `indication`'dadır. İmza ve sonuç `valid`/`status`,
+  `validationDetails.timestampValid`, bildirimler ve metrikler etkilenmez.
+  .NET istemcisindeki `TimestampInfo.Valid` açıklaması zaten bu anlamı tarif
+  ediyordu.
+- Politika çözümleme `AdvancedSignatureVerificationService`'ten
+  `ActivePolicyStore`'a taşındı. Yapılandırmadaki politika ilk ihtiyaçta bir kez
+  okunup önbelleğe alınır (her doğrulamada yeniden okunmaz); `dss.policy.path`
+  dosyasındaki değişiklikler yeniden başlatma veya `mode=CONFIGURED` ile alınır.
+  Explicit `dss.policy.path` erişilemezse davranış aynıdır: servis ayağa kalkar,
+  doğrulamalar aynı `VerificationException` mesajıyla fail-fast olur (sessiz
+  fallback yok); `GET /api/v1/policy/active` `503 POLICY_UNAVAILABLE` döner.
+
+### Security
+- **Bağımsız zaman damgası doğrulamasında TSA sertifikası CMS SignerIdentifier
+  ile seçilir** (`/api/v1/verify/timestamp`) — zincir, EKU, geçerlilik ve iptal
+  kontrolleri önceden token içindeki ilk sertifikaya uygulanıyordu; artık
+  imzayı gerçekten atan sertifikaya uygulanır. SID ile eşleşen sertifika
+  bulunamazsa hata döner. Normal KamuSM token'larında sonuç değişmez.
+
+### Fixed
+- .NET istemcisi: `TimestampInfo.MessageImprint` ve
+  `TimestampVerificationResult.MessageImprint` açıklamaları "hex" diyordu;
+  API değeri Base64 döndürür (davranış değişmedi, yalnız doküman).
+- **Yavaş doğrulama: kalıcı revocation hataları gereksiz yere yeniden deneniyordu**
+  (yalnız fast-fail açıkken; kapalıyken davranış değişmedi).
+  `RetryExecutor` her hatayı geçici sayıyordu; KamuSM test CRL'leri
+  (`depo.test3.kamusm.gov.tr`) kalıcı `HTTP 400` döndüğü için her CRL 1 + 2
+  retry ve ~0.6 s backoff ile ~0.8-1.0 s sürüyor, ESA örneklerinde 4 CRL ile
+  istek başına ~3.5 s ekleniyordu. Yeni `RevocationFailureClassifier` yalnız
+  geçici hataları (timeout, bağlantı reddi/reset, HTTP 408/425/429/5xx, OCSP
+  `TRY_LATER`/`INTERNAL_ERROR`) yeniden dener; HTTP 4xx, bozuk/okunamayan
+  CRL/OCSP cevabı, DNS hatası ve desteklenmeyen protokol/URL ilk denemede
+  biter (DNS hatası çözümleyici kesintisinde de oluştuğu için negatif cache'te
+  geçici hata TTL'iyle tutulur). HTTP status, OCSP/CRL DataLoader'larına takılan
+  `StatusAwareHttpClientResponseHandler` ile tipli okunur (mesaj DSS'inkiyle
+  birebir aynı); DSS mesajından parse yedek yoldur. Retry atlanan hatalar
+  `mdss_revocation_retry_total{event="permanent"}` ile sayılır. Ölçüm (aynı
+  makine, aynı politika/kökler): ESA_MM_48 3.3-3.6 s → ilk istek ~0.7 s
+  (sıcak JVM), tekrarlar ~0.12-0.17 s; 9 ESA sıralı 20.0 s → 6.9 s (soğuk
+  başlangıç dahil). Doğrulama sonuçları 18/18 örnekte birebir aynı.
+
 ## [1.0.4] - 2026-06-17
 
 ### Fixed

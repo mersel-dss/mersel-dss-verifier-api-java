@@ -53,7 +53,7 @@ class RetryingCRLSourceTest {
     void retrySucceedsAfterTransientError() {
         CRLToken token = mock(CRLToken.class);
         when(delegate.getRevocationToken(cert, issuer))
-                .thenThrow(new RuntimeException("CRL DP 503"))
+                .thenThrow(transientFailure("CRL DP 503"))
                 .thenReturn(token);
 
         RetryPolicy policy = new RetryPolicy(3, 100L, 1000L, 2.0d, 0.0d);
@@ -66,10 +66,10 @@ class RetryingCRLSourceTest {
     @Test
     @DisplayName("Tum attempt'lar basarisizsa son exception caller'a firlatilir")
     void retryExhaustedRethrows() {
-        RuntimeException finalError = new RuntimeException("CRL fetch attempt 3 failed");
+        RuntimeException finalError = transientFailure("CRL fetch attempt 3 failed");
         when(delegate.getRevocationToken(cert, issuer))
-                .thenThrow(new RuntimeException("attempt 1"))
-                .thenThrow(new RuntimeException("attempt 2"))
+                .thenThrow(transientFailure("attempt 1"))
+                .thenThrow(transientFailure("attempt 2"))
                 .thenThrow(finalError);
 
         RetryPolicy policy = new RetryPolicy(3, 100L, 1000L, 2.0d, 0.0d);
@@ -104,6 +104,40 @@ class RetryingCRLSourceTest {
 
         assertThrows(RuntimeException.class, () -> source.getRevocationToken(cert, issuer));
         verify(delegate, times(1)).getRevocationToken(cert, issuer);
+    }
+
+    @Test
+    @DisplayName("Kalici hata (HTTP 400): retry yapilmaz, ilk hata hemen firlatilir")
+    void permanentFailureNotRetried() {
+        RuntimeException http400 = RevocationFailureCacheTest.permanentFailure();
+        when(delegate.getRevocationToken(cert, issuer)).thenThrow(http400);
+
+        RetryPolicy policy = new RetryPolicy(3, 100L, 1000L, 2.0d, 0.0d);
+        RetryingCRLSource source = new RetryingCRLSource(delegate, policy, sleeper);
+
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> source.getRevocationToken(cert, issuer));
+        assertSame(http400, thrown);
+        verify(delegate, times(1)).getRevocationToken(cert, issuer);
+    }
+
+    @Test
+    @DisplayName("Gecici hata (HTTP 503) hala 3 kez denenir")
+    void transientHttpStatusStillRetried() {
+        when(delegate.getRevocationToken(cert, issuer)).thenThrow(
+                RevocationFailureClassifierTest.dssCrlFailure(new UnacceptableHttpStatusException(503,
+                        RevocationFailureClassifierTest.dssStatusMessage(503))));
+
+        RetryPolicy policy = new RetryPolicy(3, 100L, 1000L, 2.0d, 0.0d);
+        RetryingCRLSource source = new RetryingCRLSource(delegate, policy, sleeper);
+
+        assertThrows(RuntimeException.class, () -> source.getRevocationToken(cert, issuer));
+        verify(delegate, times(3)).getRevocationToken(cert, issuer);
+    }
+
+    /** Siniflandiricinin gecici sayacagi bir hata (read timeout). */
+    static RuntimeException transientFailure(String message) {
+        return new RuntimeException(message, new java.net.SocketTimeoutException("Read timed out"));
     }
 
     private static class NoOpSleeper implements Sleeper {

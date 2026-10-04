@@ -31,6 +31,9 @@ public class KamusmRootCertificateService {
     
     private final TrustedRootCertificateResolver resolver;
 
+    @Autowired
+    private ActiveTrustStore activeTrustStore;
+
     /**
      * Refresh sonucu + aktif sertifika sayısı + son-başarı zaman damgası
      * metrikleri için opsiyonel hook. {@code required=false} — test
@@ -112,8 +115,14 @@ public class KamusmRootCertificateService {
         return resolver.getTrustedRootTokens();
     }
 
-    public CommonTrustedCertificateSource getTrustedCertificateSource() {
+    public CommonTrustedCertificateSource getConfiguredCertificateSource() {
         return resolver.getTrustedCertificateSource();
+    }
+    public RequestTrustContext getVerificationTrustContext() {
+        return activeTrustStore.snapshot(this::getConfiguredCertificateSource);
+    }
+    public CommonTrustedCertificateSource getTrustedCertificateSource() {
+        return getVerificationTrustContext().newSource();
     }
 
     public void addTrustedCertificate(CertificateToken certificate) {
@@ -154,11 +163,15 @@ public class KamusmRootCertificateService {
      * @return guvenilir bir koke zincirlenebiliyorsa {@code true}
      */
     public boolean isChainTrusted(CertificateToken certificate, List<CertificateToken> chainCandidates) {
+        return isChainTrusted(certificate, chainCandidates, getTrustedCertificateSource());
+    }
+
+    public static boolean isChainTrusted(CertificateToken certificate, List<CertificateToken> chainCandidates,
+                                         CommonTrustedCertificateSource trustedSource) {
         if (certificate == null) {
             return false;
         }
 
-        CommonTrustedCertificateSource trustedSource = resolver.getTrustedCertificateSource();
         if (trustedSource == null) {
             return false;
         }

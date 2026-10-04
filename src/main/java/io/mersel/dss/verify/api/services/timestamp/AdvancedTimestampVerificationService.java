@@ -16,7 +16,9 @@ import io.mersel.dss.verify.api.exceptions.TimestampException;
 import io.mersel.dss.verify.api.models.CertificateInfo;
 import io.mersel.dss.verify.api.models.RevocationInfo;
 import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService;
+import io.mersel.dss.verify.api.services.certificate.RequestTrustContext;
 import io.mersel.dss.verify.api.services.util.CertificateInfoExtractor;
+import io.mersel.dss.verify.api.services.util.TimestampCertificateEvidenceExtractor;
 import io.mersel.dss.verify.api.services.util.RevocationInfoExtractor;
 import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cms.CMSSignedData;
@@ -94,7 +96,15 @@ public class AdvancedTimestampVerificationService {
             MultipartFile timestampFile,
             MultipartFile originalDataFile,
             boolean validateCertificate) {
+        return verifyTimestamp(timestampFile, originalDataFile, validateCertificate,
+                rootCertificateService.getVerificationTrustContext());
+    }
 
+    public TimestampVerificationResponseDto verifyTimestamp(MultipartFile timestampFile, MultipartFile originalDataFile,
+            boolean validateCertificate, RequestTrustContext trustContext) {
+        java.util.Objects.requireNonNull(trustContext, "trustContext");
+        if (trustContext.isCustom() && !validateCertificate) throw new IllegalArgumentException("Özel etkin köklerle validateCertificate=true olmalıdır");
+        CommonTrustedCertificateSource trustedSource = trustContext.newSource();
         logger.info("Starting advanced timestamp verification. ValidateCert: {}", validateCertificate);
 
         final long tsStartNanos = System.nanoTime();
@@ -105,6 +115,7 @@ public class AdvancedTimestampVerificationService {
             TimestampToken timestampToken = parseTimestampToken(timestampBytes);
 
             TimestampVerificationResponseDto response = new TimestampVerificationResponseDto();
+            response.setTrustContext(trustContext.evidence(config.isOnlineValidationEnabled()));
             List<String> errors = new ArrayList<>();
             List<String> warnings = new ArrayList<>();
 
@@ -156,10 +167,11 @@ public class AdvancedTimestampVerificationService {
 
             // 5. TSA sertifikası ve zinciri doğrulaması
             if (validateCertificate) {
-                CertificateValidationResult certResult = validateTsaCertificateChain(timestampToken);
+                CertificateValidationResult certResult = validateTsaCertificateChain(timestampToken, trustedSource, trustContext.isCustom());
                 
                 if (certResult.getCertificateInfo() != null) {
                     response.setTsaCertificate(certResult.getCertificateInfo());
+                    response.setCertificateChain(certResult.getCertificateChain());
                     response.setTsaName(certResult.getCertificateInfo().getCommonName());
                 }
                 
@@ -234,16 +246,12 @@ public class AdvancedTimestampVerificationService {
         }
 
         try {
-            @SuppressWarnings("unchecked")
-            Collection<X509CertificateHolder> signerCerts =
-                    bcToken.getCertificates().getMatches(bcToken.getSID());
-            if (signerCerts.isEmpty()) {
-                logger.warn("Timestamp token imzaci (TSA) sertifikasini gomulu tasimiyor; "
-                        + "imza butunlugu dogrulanamadi");
+            CertificateToken signer = TimestampCertificateEvidenceExtractor.selectSigner(token);
+            if (signer == null) {
+                logger.warn("Timestamp signer cannot be identified by CMS SignerIdentifier");
                 return false;
             }
-
-            X509CertificateHolder signerCert = signerCerts.iterator().next();
+            X509CertificateHolder signerCert = new X509CertificateHolder(signer.getEncoded());
             SignerInformationVerifier verifier = new JcaSimpleSignerInfoVerifierBuilder()
                     .setProvider(BouncyCastleProvider.PROVIDER_NAME)
                     .build(signerCert);
@@ -327,7 +335,7 @@ public class AdvancedTimestampVerificationService {
     /**
      * TSA sertifikasını ve zincirini doğrular
      */
-    private CertificateValidationResult validateTsaCertificateChain(TimestampToken token) {
+    private CertificateValidationResult validateTsaCertificateChain(TimestampToken token, CommonTrustedCertificateSource trustedSource, boolean requireTrustedChain) {
         CertificateValidationResult result = new CertificateValidationResult();
         List<String> errors = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
@@ -341,7 +349,12 @@ public class AdvancedTimestampVerificationService {
                 return result;
             }
 
-            CertificateToken tsaCert = certificates.get(0);
+            CertificateToken tsaCert = TimestampCertificateEvidenceExtractor.selectSigner(token);
+            if (tsaCert == null) {
+                errors.add("TSA imzacı sertifikası SignerIdentifier ile belirlenemedi");
+                result.setErrors(errors);
+                return result;
+            }
             CertificateInfo certInfo = certificateInfoExtractor.extractCertificateInfo(tsaCert);
             result.setCertificateInfo(certInfo);
 
@@ -379,21 +392,21 @@ public class AdvancedTimestampVerificationService {
             // leaf -> issuer(kok) zincirini token icindeki sertifikalar + guven
             // deposu uzerinden dogruluyoruz. XAdES tarafindaki DSS CertificateVerifier
             // davranisinin RFC 3161 timestamp karsiligi.
-            boolean isTrusted = rootCertificateService.isChainTrusted(tsaCert, certificates);
+            boolean isTrusted = KamusmRootCertificateService.isChainTrusted(tsaCert, certificates, trustedSource);
             // Response'taki tsaCertificate.trusted alanini da senkron tut — aksi
             // halde dogrulama VALID donerken sertifika "trusted: false" gorunup
             // tutarsizlik yaratiyordu.
             certInfo.setTrusted(isTrusted);
 
             if (!isTrusted) {
-                warnings.add("TSA sertifikası güvenilir bir root'a zincirlenemiyor");
+                (requireTrustedChain ? errors : warnings).add("TSA sertifikası güvenilir bir root'a zincirlenemiyor");
             } else {
                 logger.info("TSA certificate chains to a trusted KamuSM root");
             }
 
             // 4. Revocation kontrolü (online validation aktifse)
             if (config.isOnlineValidationEnabled()) {
-                CertificateToken issuerCert = resolveIssuerCertificate(tsaCert, certificates);
+                CertificateToken issuerCert = resolveIssuerCertificate(tsaCert, certificates, trustedSource);
                 RevocationCheckResult revocationResult = checkRevocation(tsaCert, issuerCert);
                 if (!revocationResult.isValid()) {
                     errors.add(revocationResult.getError());
@@ -416,6 +429,8 @@ public class AdvancedTimestampVerificationService {
             // (Extractor bu alani set etmez; default false kaliyordu — trusted
             // iken bile "valid: false" gorunmesi tutarsizdi.)
             certInfo.setValid(isTrusted && !certInfo.isExpired() && !certInfo.isRevoked());
+            result.setCertificateChain(TimestampCertificateEvidenceExtractor.exportChain(
+                    tsaCert, certificates, trustedSource, certInfo, certificateInfoExtractor));
 
         } catch (Exception e) {
             logger.error("TSA certificate validation failed: {}", e.getMessage());
@@ -532,27 +547,9 @@ public class AdvancedTimestampVerificationService {
         return result;
     }
 
-    /**
-     * Timestamp token icinde gelen sertifika listesinde TSA sertifikasinin
-     * issuer'ini bulur. {@code TimestampToken.getCertificates()} TSA cert'i
-     * 0. indekste, issuer ve daha ust CA'lar sonraki indekslerde gelir
-     * (RFC 3161). Issuer DN eslestirmesi ile bulunur — sirayla
-     * guvenmiyoruz cunku bazi TSA'lar full chain gondermez.
-     */
+    /** Finds an issuer by both distinguished name and certificate signature, independent of CMS ordering. */
     private CertificateToken findIssuerCertificate(CertificateToken tsaCert, List<CertificateToken> chain) {
-        if (tsaCert == null || chain == null || chain.isEmpty()) {
-            return null;
-        }
-        String issuerDn = tsaCert.getIssuer().getCanonical();
-        for (CertificateToken candidate : chain) {
-            if (candidate == tsaCert) {
-                continue;
-            }
-            if (issuerDn != null && issuerDn.equals(candidate.getSubject().getCanonical())) {
-                return candidate;
-            }
-        }
-        return null;
+        return TimestampCertificateEvidenceExtractor.findIssuer(tsaCert, chain, null);
     }
 
     /**
@@ -565,13 +562,12 @@ public class AdvancedTimestampVerificationService {
      * bulunamadi" uyarisi olusuyordu. Artik leaf'i gercekten imzalamis kok'u
      * guven deposundan bulup CRL/OCSP revocation kontrolune sokabiliyoruz.
      */
-    private CertificateToken resolveIssuerCertificate(CertificateToken tsaCert, List<CertificateToken> chain) {
+    private CertificateToken resolveIssuerCertificate(CertificateToken tsaCert, List<CertificateToken> chain, CommonTrustedCertificateSource trustedSource) {
         CertificateToken issuer = findIssuerCertificate(tsaCert, chain);
         if (issuer != null) {
             return issuer;
         }
         try {
-            CommonTrustedCertificateSource trustedSource = rootCertificateService.getTrustedCertificateSource();
             if (trustedSource != null) {
                 for (CertificateToken candidate : trustedSource.getBySubject(tsaCert.getIssuer())) {
                     if (tsaCert.isSignedBy(candidate)) {
@@ -636,9 +632,12 @@ public class AdvancedTimestampVerificationService {
 
     private static class CertificateValidationResult {
         private CertificateInfo certificateInfo;
+        private List<CertificateInfo> certificateChain;
         private List<String> errors = new ArrayList<>();
         private List<String> warnings = new ArrayList<>();
 
+        public List<CertificateInfo> getCertificateChain() { return certificateChain; }
+        public void setCertificateChain(List<CertificateInfo> chain) { this.certificateChain = chain; }
         public CertificateInfo getCertificateInfo() { return certificateInfo; }
         public void setCertificateInfo(CertificateInfo certificateInfo) { this.certificateInfo = certificateInfo; }
         public List<String> getErrors() { return errors; }

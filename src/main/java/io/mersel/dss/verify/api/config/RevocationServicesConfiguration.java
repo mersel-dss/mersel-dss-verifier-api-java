@@ -11,11 +11,15 @@ import eu.europa.esig.dss.spi.x509.revocation.ocsp.OCSPSource;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
 import io.mersel.dss.verify.api.services.aia.NormalizingCachingAiaDataLoader;
+import io.mersel.dss.verify.api.services.revocation.FailureClassifier;
 import io.mersel.dss.verify.api.services.revocation.LoggingCachingCRLSource;
 import io.mersel.dss.verify.api.services.revocation.LoggingCachingOCSPSource;
 import io.mersel.dss.verify.api.services.revocation.RetryPolicy;
 import io.mersel.dss.verify.api.services.revocation.RetryingCRLSource;
 import io.mersel.dss.verify.api.services.revocation.RetryingOCSPSource;
+import io.mersel.dss.verify.api.services.revocation.RevocationFailureCache;
+import io.mersel.dss.verify.api.services.revocation.RevocationFailureClassifier;
+import io.mersel.dss.verify.api.services.revocation.StatusAwareHttpClientResponseHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -68,6 +72,16 @@ public class RevocationServicesConfiguration {
     static final String CRL_CACHE_METRIC_NAME = "mersel.revocation.crl";
 
     /**
+     * Negatif cache (basarisiz fetch) metric isimleri —
+     * {@code cache_gets_total{cache="mersel.revocation.ocsp.failure",result="hit"}}
+     * ag cagrisi yapilmadan donulen cache'li hata sayisidir.
+     */
+    static final String OCSP_FAILURE_CACHE_METRIC_NAME = "mersel.revocation.ocsp.failure";
+
+    /** CRL negatif cache metric ismi — bkz. {@link #OCSP_FAILURE_CACHE_METRIC_NAME}. */
+    static final String CRL_FAILURE_CACHE_METRIC_NAME = "mersel.revocation.crl.failure";
+
+    /**
      * AIA cache metric prefix'i — ara CA fetch cache'i. Bkz.
      * {@link #OCSP_CACHE_METRIC_NAME}; aynı naming convention.
      */
@@ -114,6 +128,10 @@ public class RevocationServicesConfiguration {
     public OCSPSource ocspSource() {
         OCSPDataLoader dataLoader = new OCSPDataLoader();
         applyTimeouts(dataLoader);
+        if (config.isRevocationFastFailEnabled()) {
+            // Ayni davranis + tipli HTTP status (retry siniflandirmasi icin).
+            dataLoader.setHttpClientResponseHandler(new StatusAwareHttpClientResponseHandler());
+        }
 
         OnlineOCSPSource online = new OnlineOCSPSource();
         online.setDataLoader(dataLoader);
@@ -123,19 +141,25 @@ public class RevocationServicesConfiguration {
 
         RetryPolicy retryPolicy = buildRetryPolicy();
         OCSPSource retryingOrPlain = retryPolicy.getMaxAttempts() > 1
-                ? new RetryingOCSPSource(online, retryPolicy, metrics)
+                ? new RetryingOCSPSource(online, retryPolicy, metrics, retryClassifier())
                 : online;
 
+        RevocationFailureCache failureCache = buildFailureCache("OCSP");
         LoggingCachingOCSPSource source = new LoggingCachingOCSPSource(
                 retryingOrPlain,
                 config.getRevocationCacheMaxSize(),
                 config.getRevocationCacheTtlSeconds(),
-                metrics);
+                metrics,
+                failureCache);
 
         bindCacheMetrics(OCSP_CACHE_METRIC_NAME, source.caffeineCache());
+        if (failureCache.isEnabled()) {
+            bindCacheMetrics(OCSP_FAILURE_CACHE_METRIC_NAME, failureCache.caffeineCache());
+        }
 
-        logger.info("OCSP source bean ready (online + {} + cache + logging + metrics)",
-                retryPolicy.getMaxAttempts() > 1 ? ("retry x" + retryPolicy.getMaxAttempts()) : "no-retry");
+        logger.info("OCSP source bean ready (online + {} + cache + {} + logging + metrics)",
+                describeRetry(retryPolicy),
+                describe(failureCache));
         return source;
     }
 
@@ -152,6 +176,10 @@ public class RevocationServicesConfiguration {
     public CRLSource crlSource() {
         CommonsDataLoader dataLoader = new CommonsDataLoader();
         applyTimeouts(dataLoader);
+        if (config.isRevocationFastFailEnabled()) {
+            // Ayni davranis + tipli HTTP status (retry siniflandirmasi icin).
+            dataLoader.setHttpClientResponseHandler(new StatusAwareHttpClientResponseHandler());
+        }
 
         OnlineCRLSource online = new OnlineCRLSource();
         online.setDataLoader(dataLoader);
@@ -161,19 +189,25 @@ public class RevocationServicesConfiguration {
 
         RetryPolicy retryPolicy = buildRetryPolicy();
         CRLSource retryingOrPlain = retryPolicy.getMaxAttempts() > 1
-                ? new RetryingCRLSource(online, retryPolicy, metrics)
+                ? new RetryingCRLSource(online, retryPolicy, metrics, retryClassifier())
                 : online;
 
+        RevocationFailureCache failureCache = buildFailureCache("CRL");
         LoggingCachingCRLSource source = new LoggingCachingCRLSource(
                 retryingOrPlain,
                 config.getCrlCacheMaxSize(),
                 config.getRevocationCacheTtlSeconds(),
-                metrics);
+                metrics,
+                failureCache);
 
         bindCacheMetrics(CRL_CACHE_METRIC_NAME, source.caffeineCache());
+        if (failureCache.isEnabled()) {
+            bindCacheMetrics(CRL_FAILURE_CACHE_METRIC_NAME, failureCache.caffeineCache());
+        }
 
-        logger.info("CRL source bean ready (online + {} + cache + logging + metrics)",
-                retryPolicy.getMaxAttempts() > 1 ? ("retry x" + retryPolicy.getMaxAttempts()) : "no-retry");
+        logger.info("CRL source bean ready (online + {} + cache + {} + logging + metrics)",
+                describeRetry(retryPolicy),
+                describe(failureCache));
         return source;
     }
 
@@ -249,6 +283,58 @@ public class RevocationServicesConfiguration {
                 config.getRevocationRetryJitterRatio());
         logger.info("Revocation retry: enabled — {}", policy);
         return policy;
+    }
+
+    /**
+     * Basarisiz OCSP/CRL fetch'leri icin negatif cache. {@code ttl-seconds=0}
+     * ise kapali bir instance doner (eski davranis). Gecersiz konfig
+     * (negatif TTL, etkinken {@code max-size <= 0}) startup'ta IAE ile
+     * fail-fast olur.
+     */
+    /**
+     * Fast-fail kapaliyken (varsayilan) her hata yeniden denenir — v1.0.4
+     * davranisi. Acikken yalniz gecici hatalar ({@link RevocationFailureClassifier}).
+     */
+    private FailureClassifier retryClassifier() {
+        return config.isRevocationFastFailEnabled()
+                ? RevocationFailureClassifier.INSTANCE
+                : FailureClassifier.retryAll();
+    }
+
+    private String describeRetry(RetryPolicy retryPolicy) {
+        if (retryPolicy.getMaxAttempts() <= 1) {
+            return "no-retry";
+        }
+        return "retry x" + retryPolicy.getMaxAttempts()
+                + (config.isRevocationFastFailEnabled() ? " (transient only)" : "");
+    }
+
+    private RevocationFailureCache buildFailureCache(String kind) {
+        if (!config.isRevocationFastFailEnabled()) {
+            logger.info("Revocation failure cache ({}): disabled (verification.revocation.fast-fail.enabled=false)",
+                    kind);
+            return RevocationFailureCache.disabled(kind);
+        }
+        RevocationFailureCache failureCache = new RevocationFailureCache(
+                kind,
+                config.getRevocationFailureCacheTtlSeconds(),
+                config.getRevocationFailureCacheTransientTtlSeconds(),
+                config.getRevocationFailureCacheMaxSize());
+        if (failureCache.isEnabled()) {
+            logger.info("Revocation failure cache ({}): enabled — permanent failures {}s, transient failures {}s, maxSize={}",
+                    kind, failureCache.getTtlSeconds(), failureCache.getTransientTtlSeconds(),
+                    failureCache.getMaxSize());
+        } else {
+            logger.info("Revocation failure cache ({}): disabled (verification.revocation.failure-cache.ttl-seconds=0)",
+                    kind);
+        }
+        return failureCache;
+    }
+
+    private static String describe(RevocationFailureCache failureCache) {
+        return failureCache.isEnabled()
+                ? "failure-cache " + failureCache.getTtlSeconds() + "s/" + failureCache.getTransientTtlSeconds() + "s"
+                : "no-failure-cache";
     }
 
     /**

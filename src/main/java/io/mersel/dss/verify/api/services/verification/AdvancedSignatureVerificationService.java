@@ -18,6 +18,8 @@ import eu.europa.esig.dss.enumerations.EncryptionAlgorithm;
 import eu.europa.esig.dss.enumerations.Indication;
 import eu.europa.esig.dss.enumerations.SignatureAlgorithm;
 import eu.europa.esig.dss.enumerations.SubIndication;
+import eu.europa.esig.dss.enumerations.TokenExtractionStrategy;
+import eu.europa.esig.dss.diagnostic.jaxb.XmlDigestMatcher;
 import eu.europa.esig.dss.model.DSSDocument;
 import eu.europa.esig.dss.model.InMemoryDocument;
 import eu.europa.esig.dss.simplereport.SimpleReport;
@@ -39,8 +41,13 @@ import io.mersel.dss.verify.api.models.enums.RejectionCode;
 import io.mersel.dss.verify.api.models.enums.SuppressionCode;
 import io.mersel.dss.verify.api.models.enums.VerificationLevel;
 import io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService;
+import io.mersel.dss.verify.api.services.certificate.RequestTrustContext;
 import io.mersel.dss.verify.api.services.notification.InvalidSignatureNotifier;
 import io.mersel.dss.verify.api.services.util.EcdsaXmlSignaturePreprocessor;
+import io.mersel.dss.verify.api.services.util.CertificateMaterialExtractor;
+import io.mersel.dss.verify.api.services.util.SignatureEvidenceExtractor;
+import org.bouncycastle.cms.CMSSignedData;
+import org.bouncycastle.tsp.TimeStampToken;
 import io.mersel.dss.verify.api.services.util.LegacyTurkishXadesAnomaly;
 import io.mersel.dss.verify.api.services.util.LegacyTurkishXadesTypeUriDetector;
 import io.mersel.dss.verify.api.services.util.RevocationInfoExtractor;
@@ -50,7 +57,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.io.Resource;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -81,6 +87,13 @@ public class AdvancedSignatureVerificationService {
 
     @Autowired
     private ResourceLoader resourceLoader;
+
+    /**
+     * Etkin doğrulama politikası (dss.policy.* yapılandırması veya
+     * POST /api/v1/policy/active). Her doğrulama başında tek bir snapshot alınır.
+     */
+    @Autowired
+    private volatile ActivePolicyStore activePolicyStore;
 
     @Autowired
     private EcdsaXmlSignaturePreprocessor ecdsaXmlSignaturePreprocessor;
@@ -318,8 +331,8 @@ public class AdvancedSignatureVerificationService {
     static final String PROFILE_STRICT = "strict";
     private static final Set<String> KNOWN_PROFILES = new LinkedHashSet<>(
             Arrays.asList(PROFILE_SIGNER_STRICT, PROFILE_STRICT));
-    private static final String POLICY_RESOURCE_TEMPLATE =
-            "classpath:policy/kamusm-%s-constraint.xml";
+    // Profil XML'lerinin (classpath:policy/kamusm-%s-constraint.xml) yüklenmesi
+    // ActivePolicyStore'dadır.
 
     /**
      * Tam custom validation policy XML. <strong>Önceliklidir</strong>:
@@ -438,7 +451,13 @@ public class AdvancedSignatureVerificationService {
             MultipartFile originalDocument,
             VerificationLevel level,
             boolean includeFailedConstraints) {
+        return verifySignature(signedDocument, originalDocument, level, includeFailedConstraints,
+                rootCertificateService.getVerificationTrustContext());
+    }
 
+    public VerificationResult verifySignature(MultipartFile signedDocument, MultipartFile originalDocument,
+            VerificationLevel level, boolean includeFailedConstraints, RequestTrustContext trustContext) {
+        java.util.Objects.requireNonNull(trustContext, "trustContext");
         logger.info("Starting advanced signature verification. Level: {}, includeFailedConstraints: {}",
                 level, includeFailedConstraints);
 
@@ -467,6 +486,12 @@ public class AdvancedSignatureVerificationService {
         long stageStartNanos = System.nanoTime();
 
         try {
+            // Etkin politika istek başında BİR KEZ okunur: DSS'e verilen XML ile
+            // yanıttaki policyContext aynı snapshot'tan gelir; istek sürerken
+            // yapılan etkinleştirme bu doğrulamayı etkilemez. Yapılandırmadaki
+            // politika yüklenemezse fail-fast (bkz. ActivePolicyStore).
+            ActivePolicyStore.Snapshot policy = policyStore().snapshot();
+
             signedBytes = signedDocument.getBytes();
 
             // GİB/TÜBİTAK Mali Mühür ECDSA imzaları (DER-encoded) için W3C XMLDSig
@@ -506,17 +531,19 @@ public class AdvancedSignatureVerificationService {
             // Eksik anahtarlar otomatik dss-messages.properties (English)
             // ile fallback eder.
             validator.setLocale(dssValidationLocale);
+            // Export the exact certificates used by DSS, including fetched CA/TSA certificates.
+            validator.setTokenExtractionStrategy(TokenExtractionStrategy.EXTRACT_CERTIFICATES_AND_TIMESTAMPS);
 
             if (!detachedContents.isEmpty()) {
                 validator.setDetachedContents(detachedContents);
             }
 
             // Certificate verifier'ı ayarla
-            CertificateVerifier certificateVerifier = createAdvancedCertificateVerifier();
+            CertificateVerifier certificateVerifier = createAdvancedCertificateVerifier(trustContext);
             validator.setCertificateVerifier(certificateVerifier);
 
             // Doğrulama yap. Validation policy resolution explicit ve
-            // fail-fast (bkz. openValidationPolicyStream JavaDoc) — sessiz
+            // fail-fast (bkz. ActivePolicyStore) — sessiz
             // fallback yok, çünkü yanlış policy ile valid göstermek prod
             // riski yaratır. Default profil signer-strict (KamuSM Mali Mühür
             // için imzacı OCSP/CRL zorunlu, ara CA WARN).
@@ -524,7 +551,7 @@ public class AdvancedSignatureVerificationService {
             stageStartNanos = recordStage("build_validator", stageStartNanos);
 
             Reports reports;
-            try (InputStream policyStream = openValidationPolicyStream()) {
+            try (InputStream policyStream = policy.openStream()) {
                 reports = validator.validateDocument(policyStream);
             }
 
@@ -562,6 +589,8 @@ public class AdvancedSignatureVerificationService {
             VerificationResult result = parseAdvancedVerificationResult(
                     reports, level, signedBytes, packagingBySignatureId,
                     includeFailedConstraints);
+            result.setTrustContext(trustContext.evidence(config.isOnlineValidationEnabled()));
+            result.setPolicyContext(policy.context());
 
             // Aşama: parse_result (DSS rapor → VerificationResult) bitti.
             recordStage("parse_result", stageStartNanos);
@@ -788,10 +817,35 @@ public class AdvancedSignatureVerificationService {
     }
 
     /**
-     * Validator'a verilecek validation policy XML'ini açar.
+     * Etkin politika deposu. Spring dışında ({@code new} ile, birim testleri)
+     * oluşturulan servis için {@code dss.policy.*} alanlarından yapılandırma
+     * deposu kurulur (etkinleştirme kapalı).
+     */
+    private ActivePolicyStore policyStore() {
+        ActivePolicyStore store = activePolicyStore;
+        if (store != null) return store;
+        synchronized (this) {
+            if (activePolicyStore == null) {
+                activePolicyStore = new ActivePolicyStore(policyProfile, policyPath, resourceLoader,
+                        ActivePolicyStore.DEFAULT_MAX_BYTES, false);
+            }
+            return activePolicyStore;
+        }
+    }
+
+    /** Policy used by subsequent signature validations (the ACTIVE policy), not proof of a past report.
+     * Does not open remote resources or expose configured paths/credentials. */
+    public Map<String, Object> getValidationPolicyInfo() {
+        return policyStore().describe();
+    }
+
+    /**
+     * Validator'a verilecek etkin validation policy XML'ini açar.
      *
-     * <p><b>Resolution algoritması</b> (deterministik, audit edilebilir):</p>
+     * <p><b>Resolution algoritması</b> (deterministik, audit edilebilir;
+     * {@link ActivePolicyStore}):</p>
      * <ol>
+     *   <li>POST /api/v1/policy/active ile etkinleştirilmiş bir politika varsa → o.</li>
      *   <li><code>dss.policy.path</code> set ise → onu yükle. Yoksa veya
      *       erişilemezse <strong>fail-fast</strong> ({@code null} dönmek
      *       yerine {@link VerificationException} atılır). Operatör explicit
@@ -805,62 +859,15 @@ public class AdvancedSignatureVerificationService {
      *       güvenlik gerilemesi yaratır.</li>
      * </ol>
      *
+     * <p>{@link #verifySignature} bu metodu değil, aynı snapshot'ı hem DSS'e
+     * hem yanıttaki {@code policyContext}'e veren
+     * {@link ActivePolicyStore#snapshot()}'ı kullanır.</p>
+     *
      * @return açık {@link InputStream} (çağıran tarafın kapatması gerekir)
      * @throws VerificationException explicit yapılandırma yüklenemediğinde
      */
     InputStream openValidationPolicyStream() {
-        // 1) Explicit path → fail-fast yükle
-        if (policyPath != null && !policyPath.trim().isEmpty()) {
-            String pathToUse = policyPath.trim();
-            try {
-                Resource resource = resourceLoader.getResource(pathToUse);
-                if (!resource.exists()) {
-                    throw new VerificationException(
-                            "dss.policy.path olarak verilen kaynak bulunamadı: "
-                                    + pathToUse + ". Operatör explicit XML belirtti, "
-                                    + "sessiz fallback yapılmıyor.");
-                }
-                logger.info("Using custom validation policy from dss.policy.path={}", pathToUse);
-                return resource.getInputStream();
-            } catch (VerificationException ve) {
-                throw ve;
-            } catch (Exception e) {
-                throw new VerificationException(
-                        "dss.policy.path yüklenemedi (" + pathToUse + "): "
-                                + e.getMessage(), e);
-            }
-        }
-
-        // 2) Built-in profile
-        String requested = (policyProfile != null) ? policyProfile.trim().toLowerCase(Locale.ROOT) : "";
-        String effective = requested;
-        if (!KNOWN_PROFILES.contains(effective)) {
-            logger.warn("Bilinmeyen dss.policy.profile='{}' (geçerli değerler: {}). "
-                            + "Default '{}' profiline düşülüyor.",
-                    policyProfile, KNOWN_PROFILES, PROFILE_SIGNER_STRICT);
-            effective = PROFILE_SIGNER_STRICT;
-        }
-        String resourcePath = String.format(POLICY_RESOURCE_TEMPLATE, effective);
-        try {
-            Resource resource = resourceLoader.getResource(resourcePath);
-            if (!resource.exists()) {
-                // Build/packaging hatası — built-in profil XML'i jar'da olmalı.
-                // Sessiz DSS default'a düşmek prod güvenliğini zedeler.
-                throw new VerificationException(
-                        "Built-in policy profile XML'i sınıf yolunda yok: "
-                                + resourcePath + ". Jar build edilirken "
-                                + "src/main/resources/policy/ klasörüne eklendiğinden emin olun.");
-            }
-            logger.info("Using built-in validation policy profile '{}' ({})",
-                    effective, resourcePath);
-            return resource.getInputStream();
-        } catch (VerificationException ve) {
-            throw ve;
-        } catch (Exception e) {
-            throw new VerificationException(
-                    "Built-in policy profile XML'i okunamadı (" + resourcePath + "): "
-                            + e.getMessage(), e);
-        }
+        return policyStore().snapshot().openStream();
     }
 
     /**
@@ -881,10 +888,10 @@ public class AdvancedSignatureVerificationService {
      * iken bean'ler context'te yoktur; verifier sadece kriptografik butunluk
      * ve trusted chain kontrolu yapar — revocation tabakasi devre disi.</p>
      */
-    private CertificateVerifier createAdvancedCertificateVerifier() {
+    private CertificateVerifier createAdvancedCertificateVerifier(RequestTrustContext trustContext) {
         CommonCertificateVerifier verifier = new CommonCertificateVerifier();
 
-        CertificateSource trustedSource = rootCertificateService.getTrustedCertificateSource();
+        CertificateSource trustedSource = trustContext.newSource();
         verifier.addTrustedCertSources(trustedSource);
 
         if (config.isOnlineValidationEnabled()) {
@@ -1009,6 +1016,7 @@ public class AdvancedSignatureVerificationService {
 
         result.setValid(allValid);
         result.setStatus(allValid ? "VALID" : "INVALID");
+        SignatureEvidenceExtractor.connectCounterSignatures(signatureInfos);
         result.setSignatures(signatureInfos);
         result.setSignatureCount(signatureInfos.size());
 
@@ -1176,6 +1184,7 @@ public class AdvancedSignatureVerificationService {
             }
         }
 
+        SignatureEvidenceExtractor.enrichPolicyRecommendations(sigInfo, detailedReport);
         return sigInfo;
     }
 
@@ -2028,11 +2037,17 @@ public class AdvancedSignatureVerificationService {
 
         // Timestamp bilgileri
         List<TimestampWrapper> timestamps = signatureWrapper.getTimestampList();
-        if (timestamps != null && !timestamps.isEmpty()) {
-            sigInfo.setTimestampInfo(extractTimestampInfo(
-                    timestamps.get(0), detailedReport, includeFailedConstraints));
-            sigInfo.setTimestampCount(timestamps.size());
+        List<TimestampInfo> timestampInfos = new ArrayList<>();
+        if (timestamps != null) {
+            for (TimestampWrapper timestamp : timestamps) {
+                if (timestamp != null) timestampInfos.add(extractTimestampInfo(
+                        timestamp, detailedReport, includeFailedConstraints));
+            }
         }
+        sigInfo.setTimestamps(timestampInfos);
+        sigInfo.setTimestampCount(timestampInfos.size());
+        // Preserve the existing first-timestamp alias for older consumers.
+        if (!timestampInfos.isEmpty()) sigInfo.setTimestampInfo(timestampInfos.get(0));
 
         // Sertifika zincirinin revocation durumu — SIMPLE/COMPREHENSIVE fark
         // etmeksizin hesaplanir. SIMPLE modda kullanici zincirin tam detayini
@@ -2060,6 +2075,7 @@ public class AdvancedSignatureVerificationService {
                 sigInfo.setPolicyIdentifier(signatureWrapper.getPolicyId());
             }
         }
+        SignatureEvidenceExtractor.enrich(sigInfo, signatureWrapper);
     }
 
     /**
@@ -2067,7 +2083,12 @@ public class AdvancedSignatureVerificationService {
      */
     private CertificateInfo extractCertificateInfo(CertificateWrapper certWrapper) {
         CertificateInfo certInfo = new CertificateInfo();
-        
+        certInfo.setCertificateId(certWrapper.getId());
+        CertificateWrapper issuer = certWrapper.getSigningCertificate();
+        if (issuer != null) certInfo.setIssuerCertificateId(issuer.getId());
+        certInfo.setCertificatePolicyOids(certWrapper.getCertificatePoliciesOids());
+        CertificateMaterialExtractor.enrich(certInfo, certWrapper.getBinaries());
+
         certInfo.setCommonName(certWrapper.getReadableCertificateName());
         certInfo.setSerialNumber(certWrapper.getSerialNumber());
         certInfo.setSubject(certWrapper.getCertificateDN());
@@ -2150,7 +2171,34 @@ public class AdvancedSignatureVerificationService {
             boolean includeFailedConstraints) {
         TimestampInfo tsInfo = new TimestampInfo();
         
-        tsInfo.setValid(timestampWrapper.isMessageImprintDataFound() && timestampWrapper.isMessageImprintDataIntact());
+        tsInfo.setTimestampId(timestampWrapper.getId());
+        tsInfo.setMessageImprintDataFound(timestampWrapper.isMessageImprintDataFound());
+        tsInfo.setMessageImprintDataIntact(timestampWrapper.isMessageImprintDataIntact());
+        // A matching imprint alone does not prove the TSA signature, chain or policy passed.
+        tsInfo.setValid(false);
+        if (detailedReport != null && timestampWrapper.getId() != null) {
+            Indication indication = detailedReport.getFinalIndication(timestampWrapper.getId());
+            SubIndication subIndication = detailedReport.getFinalSubIndication(timestampWrapper.getId());
+            if (indication != null) {
+                tsInfo.setIndication(indication.name());
+                tsInfo.setValid(indication == Indication.PASSED || indication == Indication.TOTAL_PASSED);
+            }
+            if (subIndication != null) tsInfo.setSubIndication(subIndication.name());
+        }
+        XmlDigestMatcher imprint = timestampWrapper.getMessageImprint();
+        if (imprint != null) {
+            if (imprint.getDigestMethod() != null) tsInfo.setDigestAlgorithm(imprint.getDigestMethod().getName());
+            if (imprint.getDigestValue() != null) tsInfo.setMessageImprint(Base64.getEncoder().encodeToString(imprint.getDigestValue()));
+        }
+        byte[] timestampBytes = timestampWrapper.getBinaries();
+        if (timestampBytes != null && timestampBytes.length > 0) {
+            try {
+                TimeStampToken token = new TimeStampToken(new CMSSignedData(timestampBytes));
+                tsInfo.setSerialNumber(token.getTimeStampInfo().getSerialNumber().toString());
+            } catch (Exception e) {
+                logger.debug("Timestamp serial number unavailable for {}", timestampWrapper.getId());
+            }
+        }
         tsInfo.setTimestampTime(timestampWrapper.getProductionTime());
         
         if (timestampWrapper.getType() != null) {
@@ -2161,7 +2209,15 @@ public class AdvancedSignatureVerificationService {
         CertificateWrapper tsaCert = timestampWrapper.getSigningCertificate();
         if (tsaCert != null) {
             tsInfo.setTsaName(tsaCert.getReadableCertificateName());
+            tsInfo.setTsaCertificate(extractCertificateInfo(tsaCert));
         }
+        List<CertificateInfo> tsaChain = new ArrayList<>();
+        if (timestampWrapper.getCertificateChain() != null) {
+            for (CertificateWrapper certificate : timestampWrapper.getCertificateChain()) {
+                if (certificate != null) tsaChain.add(extractCertificateInfo(certificate));
+            }
+        }
+        tsInfo.setCertificateChain(tsaChain);
 
         // BBB FAIL constraint analizi — imza tarafıyla bire bir simetrik.
         // DetailedReport null ise (defansif) hiçbir alan doldurulmaz;

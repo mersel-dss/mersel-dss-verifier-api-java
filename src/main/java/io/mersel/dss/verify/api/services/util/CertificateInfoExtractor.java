@@ -22,6 +22,8 @@ public class CertificateInfoExtractor {
         }
 
         CertificateInfo info = new CertificateInfo();
+        info.setCertificateId(certToken.getDSSIdAsString());
+        CertificateMaterialExtractor.enrich(info, certToken.getCertificate());
         
         try {
             String subjectDN = certToken.getSubject().getPrettyPrintRFC2253();

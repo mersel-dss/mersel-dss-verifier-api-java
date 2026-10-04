@@ -1,0 +1,38 @@
+# =============================================================================
+# ServiceMonitor — kube-prometheus-stack (release adi: prometheus, ns: o11y)
+#
+# Operator bu CRD'yi yalniz su kosullarda toplar:
+#   1) metadata.labels Prometheus CR'nin serviceMonitorSelector'una uymali.
+#      kube-prometheus-stack default'u: { release: <helm-release> } → burada
+#      'prometheus'. Dogrulama:
+#        kubectl -n o11y get prometheus -o jsonpath='{.items[*].spec.serviceMonitorSelector}'
+#   2) Bu ServiceMonitor'un bulundugu namespace, Prometheus CR'nin
+#      serviceMonitorNamespaceSelector'una uymali. Bos ({}) ise TUM
+#      namespace'ler taranir → bu dosyayi 'general'da birakabilirsiniz.
+#      Bos DEGILSE ve 'general'i kapsamiyorsa: bu dosyanin namespace'ini
+#      'o11y' yapin (spec.selector + namespaceSelector app'i yine general'da
+#      bulur). Dogrulama:
+#        kubectl -n o11y get prometheus -o jsonpath='{.items[*].spec.serviceMonitorNamespaceSelector}'
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mersel-signature-verifier-proxy
+  namespace: general
+  labels:
+    release: prometheus
+spec:
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames:
+      - general
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mersel-signature-verifier-proxy
+      mersel.io/purpose: metrics
+  endpoints:
+    - port: http-metrics
+      path: /actuator/prometheus
+      scheme: http
+      interval: 15s
+      scrapeTimeout: 10s

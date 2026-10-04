@@ -13,11 +13,20 @@ import java.util.function.Supplier;
  *
  * <h3>Davranis sozlesmesi</h3>
  * <ul>
- *   <li>Supplier {@code RuntimeException} firlatirsa: policy'nin
- *       <code>maxAttempts</code>'i tukenene kadar yeniden dener. Tukendiginde
- *       <strong>son exception olduğu gibi tekrar firlatilir</strong> (cunku
- *       caller — decorator wrapper — bu hatayi mevcut log + cache mantigi
- *       icinde dogru sekilde yakalayip null'a cevirebilsin).</li>
+ *   <li>Supplier {@code RuntimeException} firlatirsa hata
+ *       {@link FailureClassifier} ile siniflandirilir:
+ *       <ul>
+ *         <li><b>retry edilebilir</b> ise policy'nin <code>maxAttempts</code>'i
+ *             tukenene kadar yeniden denenir;</li>
+ *         <li><b>retry edilemez</b> ise (kalici: orn. HTTP 400, bozuk CRL;
+ *             ya da DNS hatasi gibi saniye-alti retry'in ayni sonucu
+ *             verdigi gecici hata) yeniden denenmez — retry yalniz gecikme
+ *             ekler.</li>
+ *       </ul>
+ *       Her iki durumda da <strong>son exception olduğu gibi tekrar
+ *       firlatilir</strong> (cunku caller — decorator wrapper — bu hatayi
+ *       mevcut log + cache mantigi icinde dogru sekilde yakalayip null'a
+ *       cevirebilsin).</li>
  *   <li>Supplier <code>null</code> donerse: bu transient bir hata DEGIL
  *       (delegate "responder bilmiyorum" demis); retry YAPILMAZ, null
  *       caller'a dondurulur.</li>
@@ -49,8 +58,16 @@ public final class RetryExecutor {
     /** Metric etiketi: {@code ocsp} veya {@code crl}; metrics null ise kullanılmaz. */
     private final String kind;
 
+    /** Gecici / kalici hata ayrimi; kalici hatalar yeniden denenmez. */
+    private final FailureClassifier classifier;
+
+    /**
+     * Genel amacli constructor — her {@code RuntimeException}'i gecici sayar
+     * ({@link FailureClassifier#retryAll()}). Revocation decorator'lari
+     * {@link RevocationFailureClassifier} ile kurulur.
+     */
     public RetryExecutor(RetryPolicy policy, Sleeper sleeper) {
-        this(policy, sleeper, null, null);
+        this(policy, sleeper, null, null, FailureClassifier.retryAll());
     }
 
     /**
@@ -61,10 +78,22 @@ public final class RetryExecutor {
      */
     public RetryExecutor(RetryPolicy policy, Sleeper sleeper,
                          io.mersel.dss.verify.api.metrics.VerificationMetrics metrics, String kind) {
+        this(policy, sleeper, metrics, kind, FailureClassifier.retryAll());
+    }
+
+    /**
+     * Siniflandirici-aware constructor.
+     *
+     * @param classifier hangi hatalarin yeniden denenecegine karar verir
+     */
+    public RetryExecutor(RetryPolicy policy, Sleeper sleeper,
+                         io.mersel.dss.verify.api.metrics.VerificationMetrics metrics, String kind,
+                         FailureClassifier classifier) {
         this.policy = Objects.requireNonNull(policy, "policy must not be null");
         this.sleeper = Objects.requireNonNull(sleeper, "sleeper must not be null");
         this.metrics = metrics;
         this.kind = kind;
+        this.classifier = Objects.requireNonNull(classifier, "classifier must not be null");
     }
 
     public RetryPolicy getPolicy() {
@@ -98,6 +127,17 @@ public final class RetryExecutor {
                 return result;
             } catch (RuntimeException e) {
                 lastException = e;
+                FailureClassification classification = classify(e);
+                if (!classification.isRetryable()) {
+                    if (maxAttempts > 1) {
+                        logger.info("Not retrying '{}' (attempt {}/{}): {} failure [{}]: {}",
+                                operation, attempt, maxAttempts,
+                                classification.isTransient() ? "non-retryable transient" : "permanent",
+                                classification.getReason(), e.getMessage());
+                        recordRetryEvent("permanent");
+                    }
+                    throw e;
+                }
                 if (attempt >= maxAttempts) {
                     logger.warn("Retry exhausted for '{}' after {} attempt(s); last error: {}",
                             operation, maxAttempts, e.getMessage());
@@ -107,8 +147,8 @@ public final class RetryExecutor {
                 long rawBackoff = policy.computeRawBackoffMs(attempt - 1);
                 long sleepMs = applyJitter(rawBackoff, policy.getJitterRatio());
                 recordRetryEvent("retried");
-                logger.info("Retrying '{}' after {}ms (next attempt {}/{}); transient error: {}",
-                        operation, sleepMs, attempt + 1, maxAttempts, e.getMessage());
+                logger.info("Retrying '{}' after {}ms (next attempt {}/{}); transient error [{}]: {}",
+                        operation, sleepMs, attempt + 1, maxAttempts, classification.getReason(), e.getMessage());
                 try {
                     if (sleepMs > 0L) {
                         sleeper.sleep(sleepMs);
@@ -123,6 +163,20 @@ public final class RetryExecutor {
         // Tum attempt'lar bitti; son exception'i caller'a uzat.
         // lastException null olamaz (loop body'sinde her zaman atanir).
         throw lastException;
+    }
+
+    /**
+     * Siniflandirici hata firlatirsa eski davranisa (retry) dusulur — bir
+     * siniflandirma hatasi dogrulama akisini bozamaz.
+     */
+    private FailureClassification classify(RuntimeException e) {
+        try {
+            FailureClassification c = classifier.classify(e);
+            return c != null ? c : FailureClassification.transientFailure("unclassified");
+        } catch (RuntimeException classifierError) {
+            logger.debug("Failure classifier error ({}); treating as transient", classifierError.toString());
+            return FailureClassification.transientFailure("unclassified");
+        }
     }
 
     private void recordRetryEvent(String event) {

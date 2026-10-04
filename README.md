@@ -394,6 +394,43 @@ katmanları için ayrı ayrı `RevocationDataAvailable`, `NotRevoked`,
 seviyesinde yapılandırabilirsiniz — DSS native policy şeması zaten
 katman bazlı (bkz. `SigningCertificate` ve `CACertificate` node'ları).
 
+##### Çalışma Anında Politika Etkinleştirme
+
+> [!WARNING]
+> **Prod ortamında kesinlikle kullanmayın.** Bu özellik yalnız TÜBİTAK Uyum
+> Değerlendirme sürecindeki deployment'lar için geliştirilmiştir. Varsayılan
+> olarak kapalıdır ve yalnız `POLICY_ACTIVATION_ENABLED=true` ENV'i ile açılır
+> (feature flag); evaluation profili veya `REQUEST_TRUST_ENABLED` açmaz. Açıkken
+> uygulama başlangıçta WARN loglar.
+
+Yukarıdaki yapılandırma **başlangıç** politikasıdır. Feature flag açıksa etkin
+politika yeniden başlatmadan `GET/POST /api/v1/policy/active` ile okunup
+değiştirilebilir (Compliance UI'daki "Sunucuda etkinleştir"):
+
+```bash
+# POLICY_ACTIVATION_ENABLED=true    # feature flag, varsayılan false — prod'da AÇMAYIN
+                                    # (yalnız TÜBİTAK Uyum Değerlendirme deployment'ları)
+POLICY_MAX_BYTES=1048576            # CUSTOM_XML yükleme sınırı (1 MiB)
+```
+
+- `mode=BUILT_IN` + `profile=signer-strict|strict`, `mode=CUSTOM_XML` +
+  `policyXml` dosyası (+ opsiyonel `policyName`), `mode=CONFIGURED`
+  (yapılandırmaya dönüş). Her istekte `expectedPolicyId` (GET'ten alınan
+  güncel `policyId`) zorunludur; eskiyse **409 `CONFLICT`**.
+- Özel XML DOCTYPE/ENTITY içeremez (XXE-güvenli ayrıştırma), iyi
+  biçimlendirilmiş olmalı ve DSS `ConstraintsParameters` XSD'siyle
+  yüklenebilmelidir; aksi halde **400 `INVALID_POLICY`**. Kapalıysa
+  **403 `POLICY_ACTIVATION_DISABLED`**.
+- Etkinleştirme **global** (sonraki tüm imza doğrulamaları) ve **bellek
+  içidir**: yeniden başlatma `DSS_POLICY_PROFILE`/`DSS_POLICY_PATH`'e döner.
+  Erişimi deployment seviyesinde kısıtlayın.
+- `/api/v1/info` → `verificationPolicy` etkin politikayı gösterir;
+  `policyCapabilities: {activationSupported, activationEnabled, maxBytes}`.
+  İmza doğrulama yanıtları kullanılan politikayı `policyContext`
+  (`policyId`, `profile`, `source`, `name`, `sha256`) ile bildirir.
+
+Ayrıntılı sözleşme: [docs/policy-activation.md](docs/policy-activation.md).
+
 #### Revocation Pipeline (OCSP/CRL)
 
 DSS policy revocation **kuralını** belirler (`RevocationDataAvailable=FAIL` mı, `WARN` mı, vb.); bu bölümdeki env'ler revocation **altyapısını** (HTTP fetch, cache, retry) yapılandırır. İkisi ortogonal.
@@ -403,14 +440,16 @@ DSS policy revocation **kuralını** belirler (`RevocationDataAvailable=FAIL` m�
 ```
 OnlineOCSPSource / OnlineCRLSource   [DSS — gerçek HTTP fetch]
    │
-   ▼ RetryingOCSPSource / RetryingCRLSource    [exponential backoff + jitter]
+   ▼ RetryingOCSPSource / RetryingCRLSource    [exponential backoff + jitter; fast-fail açıkken yalnız geçici hatalar]
    │
-   ▼ LoggingCachingOCSPSource / LoggingCachingCRLSource    [Caffeine cache + INFO log]
+   ▼ LoggingCachingOCSPSource / LoggingCachingCRLSource    [Caffeine cache + INFO log; fast-fail açıkken + negatif cache + single-flight]
    │
    ▼ CertificateVerifier (DSS) — policy kararı uygular
 ```
 
-Cache **dış** katman: cache hit retry'a girilmez (hızlı dönüş). Retry yalnız gerçek HTTP fetch'inde devreye girer. Strict-safe garantisi: tüm retry'lar tükenirse son exception `LoggingCachingOCSPSource`'ta WARN'lanır ve `null` döner → DSS `signer-strict` / `strict` policy'sindeki `RevocationDataAvailable=FAIL` kuralı tetiklenir → imza `INDETERMINATE/NO_REVOCATION_DATA`.
+Cache **dış** katman: cache hit retry'a girilmez (hızlı dönüş). Retry yalnız gerçek HTTP fetch'inde devreye girer: varsayılan olarak her hata yeniden denenir; fast-fail açıkken yalnız **geçici** hatalar (aşağıdaki "Revocation Fast-Fail"). Strict-safe garantisi: tüm retry'lar tükenirse (fast-fail açıkken hata kalıcıysa ilk denemede) son exception `LoggingCachingOCSPSource`'ta WARN'lanır ve `null` döner → DSS `signer-strict` / `strict` policy'sindeki `RevocationDataAvailable=FAIL` kuralı tetiklenir → imza `INDETERMINATE/NO_REVOCATION_DATA`.
+
+Fast-fail açıkken başarısız fetch'ler kısa süre **negatif cache**'te tutulur (aşağıdaki "Negatif Cache"); bu sürede aynı sertifika için ağ çağrısı yapılmaz ve aynı `null` döner — DSS aynı girdiyi gördüğü için doğrulama kararı değişmez.
 
 ##### Cache Parametreleri
 
@@ -431,7 +470,9 @@ REVOCATION_CACHE_TTL=3600               # Default TTL (saniye). Token'in kendi
 | `GOOD` / `REVOKED` | ✅ Cache'lenir | Status sabit; tekrar fetch israf |
 | `UNKNOWN` | ❌ Cache'lenmez | Responder geçici down olabilir, bir sonraki çağrıda yeniden denenir |
 | `null` (responder boş döndü) | ❌ Cache'lenmez | Transient olabilir |
-| Exception (network fail) | ❌ Cache'lenmez | Retry exhausted sonrası |
+| Exception (fast-fail kapalı — varsayılan) | ❌ Cache'lenmez | Her istek yeniden fetch eder (v1.0.4 davranışı) |
+| Exception — kalıcı (HTTP 4xx, bozuk cevap), fast-fail açık | ⏱ Negatif cache, `REVOCATION_FAILURE_CACHE_TTL_SECONDS` (300 s) | Aynı istek aynı hatayı verir; tekrar fetch yalnız gecikme |
+| Exception — geçici (timeout/5xx, retry'lar tükendi; DNS hatası), fast-fail açık | ⏱ Negatif cache, `REVOCATION_FAILURE_CACHE_TRANSIENT_TTL_SECONDS` (30 s) | Kesintide her isteğin 30 s beklemesini ve KamuSM'e yük bindirmesini önler; kısa TTL ile toparlanan responder hızla yeniden kullanılır |
 
 ##### HTTP Timeout Parametreleri
 
@@ -471,6 +512,32 @@ REVOCATION_RETRY_JITTER_RATIO=0.2         # ±jitterRatio rastgele varyasyon
                                           # yaparsanız test determinizmi artar.
 ```
 
+##### Revocation Fast-Fail (Feature Flag)
+
+```bash
+REVOCATION_FAST_FAIL_ENABLED=false   # Feature flag, varsayılan KAPALI.
+```
+
+Kapalıyken (varsayılan, canlı ortam) revocation davranışı v1.0.4 ile **birebir aynıdır**: her hata `REVOCATION_RETRY_MAX_ATTEMPTS`'e kadar yeniden denenir, başarısız fetch'ler hatırlanmaz, her istek yeniden fetch eder. Açıkken üç özellik birlikte devreye girer: aşağıdaki hata sınıflandırması (yalnız geçici hatalar yeniden denenir), negatif cache ve single-flight. KamuSM test deposunun (`depo.test3.kamusm.gov.tr`) kalıcı HTTP 400 döndüğü TÜBİTAK Uyum Değerlendirme / test deployment'ları için geliştirilmiştir.
+
+> Takas: fast-fail açıkken responder toparlandıktan sonra aynı sertifika için negatif cache TTL'i kadar (geçici 30 s / kalıcı 300 s) "revocation verisi yok" dönebilir.
+
+**Hata sınıflandırması** (`RevocationFailureClassifier`, yalnız fast-fail açıkken) — retry yalnız geçici hatalarda yapılır:
+
+| Hata | Sınıf | Retry |
+|---|---|---|
+| Connect/read timeout, havuz lease timeout | geçici | ✅ |
+| Bağlantı reddi (connection refused), reset, no route, erken kapanan bağlantı | geçici | ✅ |
+| HTTP 408, 425, 429, 5xx | geçici | ✅ |
+| OCSP `TRY_LATER`, `INTERNAL_ERROR` | geçici | ✅ |
+| HTTP 4xx (408/425/429 hariç), beklenmeyen 1xx/2xx/3xx | kalıcı | ❌ |
+| Bozuk/okunamayan CRL veya OCSP cevabı, boş gövde | kalıcı | ❌ |
+| DNS çözümleme hatası (`UnknownHostException`; çözümleyici kesintisi de bu hatayı verir) | geçici (JVM negatif DNS cache'i ~10 s, saniye-altı retry aynı sonucu alır) | ❌ |
+| Bozuk URL, desteklenmeyen protokol, TLS sertifika hatası | kalıcı | ❌ |
+| OCSP `MALFORMED_REQUEST`, `SIG_REQUIRED`, `UNAUTHORIZED` | kalıcı | ❌ |
+
+HTTP status kodu tipli olarak okunur (`StatusAwareHttpClientResponseHandler` → `UnacceptableHttpStatusException`; mesaj DSS'inkiyle birebir aynı), stok DSS handler'ı ile kurulmuş loader'lar için DSS mesajından (`HTTP status code : 400`) parse edilir. Bağlantı reddi bilinçli olarak geçici sayılır: responder/LB yeniden başlarken saniyeler içinde düzelebilir, red anında döndüğü için retry maliyeti yalnız backoff'tur (~0.6 s) ve negatif cache sayesinde TTL başına en fazla bir kez ödenir. Örnek: KamuSM test CRL'leri (`depo.test3.kamusm.gov.tr`) kalıcı HTTP 400 döner — fast-fail kapalıyken her biri 3 deneme + backoff ile ~0.8-1.0 s sürer (ESA örneklerinde 4 CRL ≈ 3.5 s); fast-fail açıkken tek denemede (~0.1 s) biter, tekrar eden isteklerde hiç ağa çıkılmaz.
+
 **Default'larla worst-case latency** (bir token için): `maxAttempts × httpTimeout + Σ backoffs` = `3 × 10s + (0.2s + 0.4s)` ≈ **30.6s** (KamuSM tamamen kapalıysa). Tipik flake yalnız +200-400ms ekler.
 
 **Senaryo örnekleri**:
@@ -482,6 +549,26 @@ REVOCATION_RETRY_JITTER_RATIO=0.2         # ±jitterRatio rastgele varyasyon
 | **Düşük-latency** (canlı API) | 2 | 100 | 1000 | 0.2 | ~20.1s |
 | **Deterministic test/CI** | 3 | 200 | 2000 | **0.0** | ~30.6s (sabit) |
 | **Retry kapalı** (`REVOCATION_RETRY_ENABLED=false`) | 1 (effective) | – | – | – | ~10s |
+
+##### Negatif Cache (Başarısız OCSP/CRL Fetch'leri)
+
+Yalnız `REVOCATION_FAST_FAIL_ENABLED=true` iken etkindir; kapalıyken aşağıdaki değerler kullanılmaz.
+
+Başarısız bir fetch, sertifika + issuer kimliği + dağıtım noktası/responder URL'leri anahtarıyla kısa süre hatırlanır. Bu sürede aynı sertifika için delegate çağrılmaz; başarısız fetch'in bugün ürettiği sonucun **aynısı** (`null` token → "revocation verisi yok") döner, dolayısıyla DSS'in vereceği karar değişmez. Başarılı cevapların cache'i (yukarıdaki `REVOCATION_CACHE_*`) aynen çalışır. Aynı sertifika için eşzamanlı istekler tek bir fetch'i paylaşır (single-flight): N paralel istek KamuSM'e N değil 1 istek gönderir.
+
+```bash
+REVOCATION_FAILURE_CACHE_TTL_SECONDS=300            # Kalıcı hatalar (HTTP 4xx, bozuk cevap, protokol).
+                                                    # 0 = negatif cache + single-flight kapalı
+                                                    # (eski davranış: her istek yeniden fetch).
+REVOCATION_FAILURE_CACHE_TRANSIENT_TTL_SECONDS=30   # Geçici hatalar (timeout/5xx sonrası retry'lar
+                                                    # tükendi; DNS hatası). TTL_SECONDS'ı aşamaz; 0 = geçici
+                                                    # hatalar cache'lenmez.
+REVOCATION_FAILURE_CACHE_MAX_SIZE=1000              # Maks kayıt (OCSP ve CRL ayrı).
+```
+
+Loglar: hata ilk cache'lendiğinde INFO `CRL fetch failure cached for 300 s: subject=..., urls=[...], failure=permanent (HTTP 400)`; cache'ten dönüldüğünde DEBUG `CRL failure cache hit`. URL'lerdeki kullanıcı bilgisi (`user:pass@`) loglanmaz. Metrikler: `cache_gets_total{cache="mersel.revocation.crl.failure"|"mersel.revocation.ocsp.failure"}`, retry atlanan kalıcı hatalar `mdss_revocation_retry_total{event="permanent"}`.
+
+> Trade-off: TTL süresince toparlanan bir responder kullanılmaz (o sertifika için "revocation verisi yok" kalır). Kalıcı hatalarda bu pratikte değişmez; geçici hatalar için TTL bu yüzden kısa (30 s). Kesin "her istekte yeniden dene" davranışı fast-fail kapalıyken (varsayılan) zaten geçerlidir; fast-fail açıkken yalnız negatif cache'i kapatmak için `REVOCATION_FAILURE_CACHE_TTL_SECONDS=0` (veya yalnız geçiciler için `REVOCATION_FAILURE_CACHE_TRANSIENT_TTL_SECONDS=0`).
 
 ##### Response — Revocation Detayları
 

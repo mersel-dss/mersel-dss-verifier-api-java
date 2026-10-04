@@ -11,6 +11,10 @@ import java.util.List;
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class TimestampVerificationResponseDto {
+    private io.mersel.dss.verify.api.models.TrustEvidence trustContext;
+    public io.mersel.dss.verify.api.models.TrustEvidence getTrustContext() { return trustContext; }
+    public void setTrustContext(io.mersel.dss.verify.api.models.TrustEvidence value) { trustContext = value; }
+
     private boolean valid;
     private String status;
     private Date timestampTime;
@@ -18,6 +22,7 @@ public class TimestampVerificationResponseDto {
     private String digestAlgorithm;
     private String messageImprint;
     private CertificateInfo tsaCertificate;
+    private List<CertificateInfo> certificateChain;
     private List<String> errors;
     private List<String> warnings;
     private Date verificationTime;
@@ -31,6 +36,9 @@ public class TimestampVerificationResponseDto {
         this.valid = valid;
         this.status = status;
     }
+
+    public List<CertificateInfo> getCertificateChain() { return certificateChain; }
+    public void setCertificateChain(List<CertificateInfo> certificateChain) { this.certificateChain = certificateChain; }
 
     // Getters and Setters
     public boolean isValid() {

@@ -1,0 +1,33 @@
+# =============================================================================
+# Metrics Service — Prometheus Operator (kube-prometheus-stack) scrape hedefi
+#
+# NEDEN AYRI BIR SERVICE?
+#   Deployment 'containerPort: 80' ilan ediyor ama uygulama SERVER_PORT=8080
+#   ile gercekte 8080'de dinliyor (Spring Actuator da ayni portta). Mevcut
+#   uygulama Service'i 80'e bakiyor olabilir; metrik endpoint'i 8080'de
+#   oldugu icin scrape'i garanti etmek adina 8080'e yonelen ozel bir Service
+#   tanimliyoruz. ServiceMonitor bu Service'in 'http-metrics' portunu hedefler.
+#
+# DEGISTIRILECEK DEGERLER: yok — namespace/label'lar mevcut Deployment ile uyumlu.
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mersel-signature-verifier-proxy-metrics
+  namespace: general
+  labels:
+    app.kubernetes.io/name: mersel-signature-verifier-proxy
+    app.kubernetes.io/instance: mersel-signature-verifier-proxy
+    mersel.io/purpose: metrics
+spec:
+  type: ClusterIP
+  # Headless degil; ama yalniz scrape icin kullanildigindan clusterIP None de
+  # yapilabilir. Standart ClusterIP birakiyoruz (debug icin port-forward kolay).
+  selector:
+    app.kubernetes.io/instance: mersel-signature-verifier-proxy
+    app.kubernetes.io/name: mersel-signature-verifier-proxy
+  ports:
+    - name: http-metrics
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

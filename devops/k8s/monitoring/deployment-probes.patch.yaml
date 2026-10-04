@@ -1,0 +1,47 @@
+# =============================================================================
+# Deployment probe yamasi — readiness self-heal'i AKTIF etmek icin.
+#
+# Mevcut Deployment'ta HIC probe yok; bu yuzden uygulamaya eklenen readiness
+# HealthIndicator'lari (verifierThreadPool + trustedRootStore) k8s tarafindan
+# SORGULANMIYOR. Asagidaki probe'lar eklenmeden self-heal devreye girmez.
+#
+# DIKKAT — ArgoCD/Helm: Bu deployment ArgoCD (java-proxies) + Helm chart
+# (backend-api-base-...) tarafindan yonetiliyor. 'kubectl patch' ile yapilan
+# degisiklik bir sonraki sync'te GERI ALINIR. Kalici cozum: ayni degerleri
+# Helm chart values'una girip ArgoCD ile sync etmek. Bu dosya hem o values
+# icin REFERANS hem de acil durumda manuel patch icin kullanilabilir:
+#
+#   kubectl -n general patch deployment mersel-signature-verifier-proxy \
+#     --type merge --patch-file devops/k8s/monitoring/deployment-probes.patch.yaml
+#
+# Port 8080: app SERVER_PORT=8080 (containerPort:80 ilanı yaniltici).
+# =============================================================================
+spec:
+  template:
+    spec:
+      containers:
+        - name: mersel-signature-verifier-proxy
+          # startupProbe: boot'ta KamuSM kok sertifikalari online cekildigi icin
+          # baslangic yavas olabilir. 30 x 10s = 5dk tolerans; bu sure dolana
+          # kadar liveness/readiness beklemede tutulur (erken restart yok).
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+            # successThreshold default 1 — doygunluk gecince pod hizla geri doner.

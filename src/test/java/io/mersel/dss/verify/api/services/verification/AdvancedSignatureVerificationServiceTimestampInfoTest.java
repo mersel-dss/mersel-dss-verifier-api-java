@@ -111,7 +111,9 @@ class AdvancedSignatureVerificationServiceTimestampInfoTest {
         assertNull(result.getRootCause());
         assertNull(result.getFailedConstraints());
         // Eski alanlar hala doldurulmuş olmalı
-        assertEquals(true, result.isValid());
+        assertFalse(result.isValid(), "A matching imprint without a DSS verdict is not a validated timestamp");
+        assertEquals(Boolean.TRUE, result.getMessageImprintDataFound());
+        assertEquals(Boolean.TRUE, result.getMessageImprintDataIntact());
     }
 
     @Test

@@ -29,7 +29,7 @@ public sealed class TimestampInfo
     [JsonPropertyName("digestAlgorithm")]
     public string? DigestAlgorithm { get; set; }
 
-    /// <summary>Imzalı veriye ait hesaplanan message imprint (hex).</summary>
+    /// <summary>Imzalı veriye ait hesaplanan message imprint (Base64).</summary>
     [JsonPropertyName("messageImprint")]
     public string? MessageImprint { get; set; }
 

@@ -2,6 +2,9 @@ package io.mersel.dss.verify.api.controllers;
 
 import io.mersel.dss.verify.api.dtos.TimestampVerificationResponseDto;
 import io.mersel.dss.verify.api.models.VerificationResult;
+import io.mersel.dss.verify.api.services.certificate.RequestTrustContext;
+import io.mersel.dss.verify.api.services.certificate.RequestTrustFactory;
+import java.util.List;
 import io.mersel.dss.verify.api.models.enums.VerificationLevel;
 import io.mersel.dss.verify.api.services.timestamp.AdvancedTimestampVerificationService;
 import io.mersel.dss.verify.api.services.verification.AdvancedSignatureVerificationService;
@@ -29,6 +32,11 @@ import org.springframework.web.multipart.MultipartFile;
 @RequestMapping("/api/v1/verify")
 @Tag(name = "Unified Verification", description = "Birleşik imza ve zaman damgası doğrulama API")
 public class UnifiedVerificationController {
+
+    @Autowired
+    private RequestTrustFactory requestTrustFactory;
+    @Autowired
+    private io.mersel.dss.verify.api.services.certificate.KamusmRootCertificateService rootCertificateService;
 
     private static final Logger logger = LoggerFactory.getLogger(UnifiedVerificationController.class);
 
@@ -75,7 +83,22 @@ public class UnifiedVerificationController {
                     + "eklensin mi? Default false — alan response'ta hiç görünmez; "
                     + "operatör yalnız tek bir rootCause görür. true ise her imzaya "
                     + "kategorize tam liste eklenir (audit/forensic için).")
-            @RequestParam(value = "includeFailedConstraints", defaultValue = "false") boolean includeFailedConstraints) {
+            @RequestParam(value = "includeFailedConstraints", defaultValue = "false") boolean includeFailedConstraints,
+            @RequestParam(value = "trustMode", defaultValue = "SERVER") String trustMode,
+            @RequestParam(value = "trustedCertificates", required = false) List<MultipartFile> trustedCertificates,
+            @RequestParam(value = "expectedTrustId", required = false) String expectedTrustId) {
+        if (expectedTrustId != null && !"SERVER".equals(trustMode))
+            throw new IllegalArgumentException("expectedTrustId yalnız etkin sunucu kökleriyle kullanılabilir");
+        RequestTrustContext trust = requestTrustFactory.resolve(trustMode, trustedCertificates);
+        if (trust != null) return ResponseEntity.ok(advancedSignatureVerificationService.verifySignature(
+                signedDocument, originalDocument, parseVerificationLevel(level), includeFailedConstraints, trust));
+        if (expectedTrustId != null) return ResponseEntity.ok(advancedSignatureVerificationService.verifySignature(
+                signedDocument, originalDocument, parseVerificationLevel(level), includeFailedConstraints, expectedSnapshot(expectedTrustId)));
+        return verifySignature(signedDocument, originalDocument, level, includeFailedConstraints);
+    }
+
+    public ResponseEntity<VerificationResult> verifySignature(MultipartFile signedDocument, MultipartFile originalDocument,
+            String level, boolean includeFailedConstraints) {
 
         logger.info("Unified signature verification request received. Level: {}, File: {}, includeFailedConstraints: {}",
                 level, signedDocument.getOriginalFilename(), includeFailedConstraints);
@@ -121,7 +144,23 @@ public class UnifiedVerificationController {
             @RequestParam(value = "originalData", required = false) MultipartFile originalData,
             
             @Parameter(description = "TSA sertifika doğrulaması yapılsın mı")
-            @RequestParam(value = "validateCertificate", defaultValue = "true") boolean validateCertificate) {
+            @RequestParam(value = "validateCertificate", defaultValue = "true") boolean validateCertificate,
+            @RequestParam(value = "trustMode", defaultValue = "SERVER") String trustMode,
+            @RequestParam(value = "trustedCertificates", required = false) List<MultipartFile> trustedCertificates,
+            @RequestParam(value = "expectedTrustId", required = false) String expectedTrustId) {
+        if (expectedTrustId != null && !"SERVER".equals(trustMode))
+            throw new IllegalArgumentException("expectedTrustId yalnız etkin sunucu kökleriyle kullanılabilir");
+        RequestTrustContext trust = requestTrustFactory.resolve(trustMode, trustedCertificates);
+        if (trust != null && !validateCertificate) throw new IllegalArgumentException("CUSTOM modunda validateCertificate=true olmalıdır");
+        if (trust != null) return ResponseEntity.ok(advancedTimestampVerificationService.verifyTimestamp(
+                timestampFile, originalData, validateCertificate, trust));
+        if (expectedTrustId != null) return ResponseEntity.ok(advancedTimestampVerificationService.verifyTimestamp(
+                timestampFile, originalData, validateCertificate, expectedSnapshot(expectedTrustId)));
+        return verifyTimestamp(timestampFile, originalData, validateCertificate);
+    }
+
+    public ResponseEntity<TimestampVerificationResponseDto> verifyTimestamp(MultipartFile timestampFile,
+            MultipartFile originalData, boolean validateCertificate) {
 
         logger.info("Timestamp verification request received. ValidateCert: {}, File: {}", 
                 validateCertificate, timestampFile.getOriginalFilename());
@@ -157,10 +196,13 @@ public class UnifiedVerificationController {
             @RequestParam("signedDocument") MultipartFile signedDocument,
             @RequestParam(value = "originalDocument", required = false) MultipartFile originalDocument,
             @RequestParam(value = "level", defaultValue = "SIMPLE") String level,
-            @RequestParam(value = "includeFailedConstraints", defaultValue = "false") boolean includeFailedConstraints) {
+            @RequestParam(value = "includeFailedConstraints", defaultValue = "false") boolean includeFailedConstraints,
+            @RequestParam(value = "trustMode", defaultValue = "SERVER") String trustMode,
+            @RequestParam(value = "trustedCertificates", required = false) List<MultipartFile> trustedCertificates,
+            @RequestParam(value = "expectedTrustId", required = false) String expectedTrustId) {
 
         logger.info("XAdES verification request (legacy endpoint)");
-        return verifySignature(signedDocument, originalDocument, level, includeFailedConstraints);
+        return verifySignature(signedDocument, originalDocument, level, includeFailedConstraints, trustMode, trustedCertificates, expectedTrustId);
     }
 
     /**
@@ -182,10 +224,13 @@ public class UnifiedVerificationController {
     public ResponseEntity<VerificationResult> verifyPAdES(
             @RequestParam("signedDocument") MultipartFile signedDocument,
             @RequestParam(value = "level", defaultValue = "SIMPLE") String level,
-            @RequestParam(value = "includeFailedConstraints", defaultValue = "false") boolean includeFailedConstraints) {
+            @RequestParam(value = "includeFailedConstraints", defaultValue = "false") boolean includeFailedConstraints,
+            @RequestParam(value = "trustMode", defaultValue = "SERVER") String trustMode,
+            @RequestParam(value = "trustedCertificates", required = false) List<MultipartFile> trustedCertificates,
+            @RequestParam(value = "expectedTrustId", required = false) String expectedTrustId) {
 
         logger.info("PAdES verification request (legacy endpoint)");
-        return verifySignature(signedDocument, null, level, includeFailedConstraints);
+        return verifySignature(signedDocument, null, level, includeFailedConstraints, trustMode, trustedCertificates, expectedTrustId);
     }
 
     /**
@@ -208,15 +253,24 @@ public class UnifiedVerificationController {
             @RequestParam("signedDocument") MultipartFile signedDocument,
             @RequestParam(value = "originalDocument", required = false) MultipartFile originalDocument,
             @RequestParam(value = "level", defaultValue = "SIMPLE") String level,
-            @RequestParam(value = "includeFailedConstraints", defaultValue = "false") boolean includeFailedConstraints) {
+            @RequestParam(value = "includeFailedConstraints", defaultValue = "false") boolean includeFailedConstraints,
+            @RequestParam(value = "trustMode", defaultValue = "SERVER") String trustMode,
+            @RequestParam(value = "trustedCertificates", required = false) List<MultipartFile> trustedCertificates,
+            @RequestParam(value = "expectedTrustId", required = false) String expectedTrustId) {
 
         logger.info("CAdES verification request");
-        return verifySignature(signedDocument, originalDocument, level, includeFailedConstraints);
+        return verifySignature(signedDocument, originalDocument, level, includeFailedConstraints, trustMode, trustedCertificates, expectedTrustId);
     }
 
     /**
      * Verification level parser
      */
+    private RequestTrustContext expectedSnapshot(String expected) {
+        RequestTrustContext context = rootCertificateService.getVerificationTrustContext();
+        if (!expected.equals(context.getActiveTrustId())) throw new io.mersel.dss.verify.api.exceptions.TrustConflictException();
+        return context;
+    }
+
     private VerificationLevel parseVerificationLevel(String level) {
         try {
             return VerificationLevel.valueOf(level.toUpperCase());
